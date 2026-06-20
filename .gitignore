@@ -1,0 +1,7 @@
+# local data / OS cruft
+*.log
+.DS_Store
+Thumbs.db
+travian-data.json
+travian-sync.json
+node_modules/
