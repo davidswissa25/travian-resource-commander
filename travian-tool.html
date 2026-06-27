@@ -1,0 +1,799 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Travian Resource Commander</title>
+<style>
+  :root{
+    --bg:#0f1419; --panel:#171e26; --panel2:#1d2630; --line:#2a3744;
+    --txt:#e6edf3; --dim:#8b9aa8; --faint:#5d6b78;
+    --crop:#f5b342; --lumber:#5fa55a; --clay:#c8703a; --iron:#9aa7b4;
+    --ok:#3fb950; --warn:#f0a92b; --bad:#f0533f; --accent:#f5b342;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--txt);font:14px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif}
+  header{display:flex;align-items:center;gap:14px;padding:14px 20px;background:var(--panel);border-bottom:1px solid var(--line);position:sticky;top:0;z-index:20}
+  header h1{font-size:17px;margin:0;font-weight:650;letter-spacing:.2px}
+  header h1 span{color:var(--crop)}
+  .grow{flex:1}
+  button{font:inherit;cursor:pointer;border:1px solid var(--line);background:var(--panel2);color:var(--txt);padding:7px 13px;border-radius:7px;transition:.12s}
+  button:hover{border-color:var(--accent);color:#fff}
+  button.primary{background:var(--accent);color:#1a1207;border-color:var(--accent);font-weight:600}
+  button.primary:hover{filter:brightness(1.08)}
+  button.ghost{background:transparent}
+  button.sm{padding:4px 9px;font-size:12px}
+  button.danger:hover{border-color:var(--bad);color:var(--bad)}
+  button:disabled{opacity:.4;cursor:not-allowed}
+  main{padding:18px 20px;max-width:1280px;margin:0 auto}
+  .cmd{display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin-bottom:20px}
+  .stat{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:14px 16px}
+  .stat .lbl{font-size:11px;text-transform:uppercase;letter-spacing:.6px;color:var(--dim)}
+  .stat .val{font-size:22px;font-weight:700;margin-top:4px}
+  .stat .sub{font-size:12px;color:var(--faint);margin-top:2px}
+  .val.good{color:var(--ok)} .val.bad{color:var(--bad)} .val.warn{color:var(--warn)} .val.crop{color:var(--crop)}
+  .tabs{display:flex;gap:6px;margin-bottom:16px;border-bottom:1px solid var(--line)}
+  .tabs button{border:none;background:none;border-bottom:2px solid transparent;border-radius:0;padding:9px 14px;color:var(--dim)}
+  .tabs button.active{color:var(--accent);border-bottom-color:var(--accent)}
+  .tabs button:hover{color:#fff}
+  .vgrid{display:grid;grid-template-columns:repeat(auto-fill,minmax(330px,1fr));gap:14px}
+  .vcard{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:14px 15px}
+  .vcard.crit{border-color:var(--bad)} .vcard.over{border-color:var(--warn)}
+  .vhead{display:flex;align-items:baseline;gap:8px;margin-bottom:10px}
+  .vhead .name{font-weight:650;font-size:15px}
+  .vhead .coord{font-size:12px;color:var(--faint)}
+  .vhead .tribe{font-size:11px;color:var(--dim);background:var(--panel2);padding:2px 7px;border-radius:5px}
+  .clock{font-size:13px;padding:8px 10px;border-radius:7px;margin:8px 0;font-weight:600}
+  .clock.bad{background:rgba(240,83,63,.12);color:var(--bad)}
+  .clock.over{background:rgba(240,169,43,.12);color:var(--warn)}
+  .clock.ok{background:rgba(63,185,80,.10);color:var(--ok)}
+  .bars{display:flex;flex-direction:column;gap:6px;margin:10px 0}
+  .bar{display:grid;grid-template-columns:46px 1fr 92px;align-items:center;gap:8px;font-size:12px}
+  .bar .track{height:9px;background:var(--panel2);border-radius:5px;overflow:hidden}
+  .bar .fill{height:100%;border-radius:5px}
+  .bar .num{text-align:right;color:var(--dim);font-variant-numeric:tabular-nums}
+  .f-lumber{background:var(--lumber)} .f-clay{background:var(--clay)} .f-iron{background:var(--iron)} .f-crop{background:var(--crop)}
+  .vmeta{display:flex;justify-content:space-between;font-size:12px;color:var(--dim);margin-top:8px;padding-top:8px;border-top:1px solid var(--line)}
+  .vactions{display:flex;gap:6px;margin-top:10px}
+  .netcrop{font-weight:700}
+  .synced{font-size:10px;color:var(--ok);border:1px solid var(--ok);border-radius:4px;padding:0 4px;margin-left:6px}
+  table{width:100%;border-collapse:collapse;font-size:13px}
+  th,td{text-align:left;padding:8px 10px;border-bottom:1px solid var(--line)}
+  th{color:var(--dim);font-size:11px;text-transform:uppercase;letter-spacing:.5px;font-weight:600}
+  td.num,th.num{text-align:right;font-variant-numeric:tabular-nums}
+  tr:hover td{background:var(--panel2)}
+  .pill{display:inline-block;padding:2px 8px;border-radius:20px;font-size:11px;font-weight:600}
+  .pill.ok{background:rgba(63,185,80,.15);color:var(--ok)}
+  .overlay{position:fixed;inset:0;background:rgba(0,0,0,.6);display:none;align-items:flex-start;justify-content:center;z-index:50;overflow:auto;padding:30px 16px}
+  .overlay.show{display:flex}
+  .modal{background:var(--panel);border:1px solid var(--line);border-radius:12px;width:100%;max-width:620px;padding:22px}
+  .modal h2{margin:0 0 16px;font-size:17px}
+  .form{display:grid;grid-template-columns:1fr 1fr;gap:12px}
+  .field{display:flex;flex-direction:column;gap:4px}
+  .field.full{grid-column:1/-1}
+  .field label{font-size:12px;color:var(--dim)}
+  input,select,textarea{font:inherit;background:var(--bg);border:1px solid var(--line);color:var(--txt);border-radius:6px;padding:7px 9px}
+  input:focus,select:focus,textarea:focus{outline:none;border-color:var(--accent)}
+  .sect{grid-column:1/-1;font-size:12px;text-transform:uppercase;letter-spacing:.5px;color:var(--faint);margin-top:6px;border-top:1px solid var(--line);padding-top:10px}
+  .modal-actions{display:flex;gap:8px;justify-content:flex-end;margin-top:18px}
+  .troop-row{display:grid;grid-template-columns:1fr 80px 80px 30px;gap:6px;align-items:center}
+  .empty{text-align:center;color:var(--faint);padding:50px 20px}
+  .empty h3{color:var(--dim)}
+  .opt-controls{display:flex;gap:14px;align-items:center;flex-wrap:wrap;background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:14px 16px;margin-bottom:16px}
+  .opt-controls label{font-size:12px;color:var(--dim);display:flex;gap:6px;align-items:center}
+  .note{font-size:12px;color:var(--faint);margin:6px 0 14px}
+  .imp{color:var(--ok);font-weight:600}
+  code{background:var(--panel2);padding:1px 5px;border-radius:4px;font-size:12px;color:var(--accent)}
+</style>
+</head>
+<body>
+<header>
+  <h1>Travian <span>Resource Commander</span></h1>
+  <div class="grow"></div>
+  <button class="ghost sm" onclick="exportJSON()">Export</button>
+  <button class="ghost sm" onclick="document.getElementById('importFile').click()">Import / Sync</button>
+  <input type="file" id="importFile" accept=".json" style="display:none" onchange="importJSON(event)">
+  <button class="ghost sm" onclick="pullFromGame()" title="Copy the retrieval script to run in your game's console">Pull from game &#9863;</button>
+  <button class="ghost sm" onclick="openPaste()">Paste from game</button>
+  <button class="primary" onclick="openVillage()">+ Village</button>
+</header>
+
+<!-- Retrieval script (mirror of retrieve-data.js). "Pull from game" copies this to run in the game console. -->
+<script type="text/plain" id="gamePullScript">
+(async function () {
+  'use strict';
+  const ALLIANCE_BONUS = 90;
+  const SERVER = (+(location.host.match(/\bx(\d+)\b/) || [])[1]) || 1;
+  const TRIBE = {
+    gaul:     { name: 'Gauls',     base: 750,  toRate: 20 },
+    roman:    { name: 'Romans',    base: 500,  toRate: 40 },
+    teuton:   { name: 'Teutons',   base: 1000, toRate: 20 },
+    egyptian: { name: 'Egyptians', base: 750,  toRate: 20 },
+    hun:      { name: 'Huns',      base: 500,  toRate: 20 },
+    spartan:  { name: 'Spartans',  base: 500,  toRate: 20 }
+  };
+  const STRIP = /[‪-‮⁦-⁩]/g;
+  const clean = s => String(s == null ? '' : s).replace(STRIP, '').replace(/\s+/g, ' ').trim();
+  const getText = u => fetch(u, { credentials: 'same-origin' }).then(r => r.text());
+  const title = h => { const dc = new DOMParser().parseFromString(h, 'text/html'); return clean((dc.querySelector('.titleInHeader, h1') || {}).textContent); };
+  const lvl = (h, label) => { const t = title(h); if (label && !new RegExp(label, 'i').test(t)) return 0; const m = t.match(/Level\s*(\d+)/i); return m ? +m[1] : 0; };
+  const log = (...a) => console.log('%c[retrieve]', 'color:#f5b342', ...a);
+  function readShipCap(did){return new Promise(res=>{const ifr=document.createElement('iframe');ifr.style.cssText='position:fixed;width:0;height:0;border:0;left:-9999px';let done=false;const fin=v=>{if(done)return;done=true;try{ifr.remove();}catch(e){}res(v);};ifr.onload=async()=>{for(let k=0;k<50;k++){try{const m=clean(ifr.contentDocument.body.innerText).match(/Capacity per trade ship:?\s*([\d,]+)/i);if(m)return fin(parseInt(m[1].replace(/[^\d]/g,''),10)||0);}catch(e){}await new Promise(r=>setTimeout(r,200));}fin(0);};ifr.src='/build.php?gid=17&t=5&newdid='+did;document.body.appendChild(ifr);setTimeout(()=>fin(0),15000);});}
+  log('reading village list...');
+  const root = await getText('/dorf1.php');
+  const i = root.indexOf('"villageList":');
+  if (i < 0) { alert('Could not read the village list - make sure you are logged into the game world.'); return; }
+  let d = 0, s = root.indexOf('[', i), j = s;
+  for (; j < root.length; j++) { const c = root[j]; if (c === '[') d++; else if (c === ']') { d--; if (!d) { j++; break; } } }
+  const list = [];
+  JSON.parse(root.slice(s, j)).forEach(e => e.villages ? e.villages.forEach(v => list.push(v)) : list.push(e));
+  log('found ' + list.length + ' villages');
+  const villages = [];
+  for (const v of list) {
+    const d1 = await getText('/dorf1.php?newdid=' + v.id);
+    const pm = d1.match(/production:\s*(\{[^}]*\})/); const p = pm ? JSON.parse(pm[1]) : {};
+    const mkt = lvl(await getText('/build.php?gid=17&newdid=' + v.id));
+    const to  = lvl(await getText('/build.php?gid=28&newdid=' + v.id), 'Trade Office');
+    const d2 = await getText('/dorf2.php?newdid=' + v.id);
+    const wm = d2.match(/class="wall\s+([a-z]+)/i); const T = TRIBE[wm ? wm[1].toLowerCase() : 'roman'] || TRIBE.roman;
+    const cap = Math.round(T.base * SERVER * (1 + T.toRate * to / 100) * (1 + ALLIANCE_BONUS / 100));
+    const harbor = clean(await getText('/build.php?gid=49&newdid=' + v.id));
+    const sm = harbor.match(/trade ?ship[^()]*\(\s*in service\s*(\d+)/i);
+    const ships = sm ? +sm[1] : 0;
+    const shipCap = ships > 0 ? await readShipCap(v.id) : 0;
+    const l4 = p.l4 || 0, l5 = p.l5 || 0;
+    villages.push({
+      name: v.name, did: v.id, x: v.x, y: v.y, tribe: T.name, synced: true,
+      prod: { lumber: p.l1 || 0, clay: p.l2 || 0, iron: p.l3 || 0, crop: l5 },
+      baseConsumption: Math.max(0, l5 - l4),
+      marketplaceLevel: mkt, tradeOfficeLevel: to, merchantCapacityReal: cap,
+      tradeShips: ships, shipCapacityReal: shipCap
+    });
+    log(v.name + ': ' + T.name + ' mkt' + mkt + ' TO' + to + ' cap' + cap + ' net' + l4);
+  }
+  if (list[0]) await getText('/dorf1.php?newdid=' + list[0].id);
+  villages.sort((a, b) => String(a.name).localeCompare(String(b.name), undefined, { numeric: true, sensitivity: 'base' }));
+  const payload = { source: 'travian-sync', note: 'retrieve-data ' + new Date().toISOString() + '; capacity computed (alliance ' + ALLIANCE_BONUS + '%, server x' + SERVER + ')', villages };
+  const json = JSON.stringify(payload, null, 2);
+  try {
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(new Blob([json], { type: 'application/json' }));
+    a.download = 'travian-carrier-data.json';
+    document.body.appendChild(a); a.click(); a.remove();
+    log('%cDONE - downloaded travian-carrier-data.json (' + villages.length + ' villages). Import it into the tool.', 'color:#3fb950');
+  } catch (e) { console.log(json); }
+  window.travianCarrierData = payload;
+  try { await navigator.clipboard.writeText(json); log('(also copied to clipboard)'); } catch (e) {}
+})();
+</script>
+
+<main>
+  <div class="cmd" id="cmdbar"></div>
+  <div class="tabs">
+    <button class="active" data-tab="dash" onclick="setTab('dash')">Dashboard</button>
+    <button data-tab="optimizer" onclick="setTab('optimizer')">Auto Routes &#9889;</button>
+    <button data-tab="routes" onclick="setTab('routes')">Trade Routes</button>
+  </div>
+  <section id="tab-dash"></section>
+  <section id="tab-optimizer" style="display:none"></section>
+  <section id="tab-routes" style="display:none"></section>
+</main>
+
+<div class="overlay" id="vOverlay"><div class="modal">
+  <h2 id="vModalTitle">Add Village</h2>
+  <div class="form" id="vForm"></div>
+  <div class="modal-actions">
+    <button class="ghost" onclick="closeVillage()">Cancel</button>
+    <button class="primary" onclick="saveVillage()">Save snapshot</button>
+  </div>
+</div></div>
+
+<div class="overlay" id="rOverlay"><div class="modal">
+  <h2 id="rModalTitle">Add Trade Route</h2>
+  <div class="form" id="rForm"></div>
+  <div class="modal-actions">
+    <button class="ghost" onclick="closeRoute()">Cancel</button>
+    <button class="primary" onclick="saveRoute()">Save route</button>
+  </div>
+</div></div>
+
+<div class="overlay" id="pOverlay"><div class="modal">
+  <h2>Paste from game</h2>
+  <p class="note">In game open <b>Statistics &rarr; Resources &rarr; Warehouse</b>, press <b>Ctrl+U</b> (view source), then <b>Ctrl+A</b>, <b>Ctrl+C</b>, and paste below. Reads every village's stock, capacity, crop balance and coordinates in one go.</p>
+  <textarea id="pasteBox" placeholder="Paste the Warehouse page source here..." style="width:100%;height:160px"></textarea>
+  <div id="pastePreview" class="note" style="max-height:160px;overflow:auto"></div>
+  <div class="modal-actions">
+    <button class="ghost" onclick="closePaste()">Cancel</button>
+    <button onclick="parsePastePreview()">Parse &amp; preview</button>
+    <button class="primary" id="pImportBtn" onclick="importPaste()" disabled>Import</button>
+  </div>
+</div></div>
+
+<script>
+const RES = ["lumber","clay","iron","crop"];
+const TRIBES = {
+  Romans:{merchantCapacity:500,merchantSpeed:16}, Gauls:{merchantCapacity:750,merchantSpeed:24},
+  Teutons:{merchantCapacity:1000,merchantSpeed:12}, Egyptians:{merchantCapacity:750,merchantSpeed:16},
+  Huns:{merchantCapacity:500,merchantSpeed:20}, Spartans:{merchantCapacity:400,merchantSpeed:16},
+};
+// Trade ship game constant (same for every harbor, like a tribe's merchant stats).
+// capacity = base resources per ship, speed = fields/hour. Server speed & alliance
+// commerce bonus are applied on top in effShipCap/effShipSpeed.
+const SHIP = {capacity:500, speed:18};  // capacity is a per-village fallback (real value retrieved); speed base 18
+const fmt = n => Math.round(n).toLocaleString();
+const signed = n => (n>=0?"+":"") + fmt(n);
+
+let state = load();
+let tab = "dash";
+let editingV = null, editingR = null;
+let optTroopRows = [];
+let optMargin = 50, optMode = "crop", optMinRoute = 200;
+let pasteResults = [];
+
+function load(){
+  let s; try{ s = JSON.parse(localStorage.getItem("travianCommander")); }catch(e){}
+  if(!s||!s.villages) s={villages:[],routes:[]};
+  if(!s.routes) s.routes=[];
+  if(s.serverSpeed==null) s.serverSpeed=2;
+  if(s.allianceBonus==null) s.allianceBonus=0;
+  if(s.defaultMarket==null) s.defaultMarket=0;
+  ensureIds(s.villages); // backfill missing/duplicate ids so edit & delete always match
+  dedupeAndSort(s);      // remove rename-duplicates (same coords) and order by village number
+  return s;
+}
+// A village's identity is its coordinates, not its name. Renaming in-game used to create
+// a second entry; collapse any villages sharing x|y (keep the most recently updated),
+// remap routes onto the survivor, then order villages by their number/name.
+function dedupeAndSort(s){
+  const byCoord={}, drop={};
+  (s.villages||[]).forEach(v=>{
+    const k=(v.x||0)+'|'+(v.y||0), ex=byCoord[k];
+    if(!ex){ byCoord[k]=v; return; }
+    const keep=((v.updatedAt||0)>=(ex.updatedAt||0))?v:ex, lose=(keep===v)?ex:v;
+    ['marketplaceLevel','merchantCapacityReal','tradeOfficeLevel','tradeShips','did','merchantCapacity','merchantSpeed'].forEach(f=>{ if(keep[f]==null && lose[f]!=null) keep[f]=lose[f]; });
+    if((!keep.troops||!keep.troops.length) && lose.troops&&lose.troops.length) keep.troops=lose.troops;
+    drop[lose.id]=keep.id; byCoord[k]=keep;
+  });
+  if(Object.keys(drop).length){
+    s.villages=s.villages.filter(v=>!(v.id in drop));
+    (s.routes||[]).forEach(r=>{ if(drop[r.from]) r.from=drop[r.from]; if(drop[r.to]) r.to=drop[r.to]; });
+    s.routes=(s.routes||[]).filter(r=>r.from!==r.to);
+  }
+  s.villages.sort((a,b)=>String(a.name||'').localeCompare(String(b.name||''),undefined,{numeric:true,sensitivity:'base'}));
+}
+function save(){ localStorage.setItem("travianCommander", JSON.stringify(state)); }
+function uid(){ return Date.now().toString(36)+Math.random().toString(36).slice(2,6); }
+// Every village must have a unique id; some imports/older data can miss it, which
+// breaks Edit and Delete (the button would call delVillage('undefined')).
+function ensureIds(vs){ const seen=new Set(); (vs||[]).forEach(v=>{ if(v.id==null||seen.has(v.id)) v.id=uid(); seen.add(v.id); }); return vs; }
+function esc(s){ return String(s==null?"":s).replace(/[&<>"]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c])); }
+
+/* ---- math ---- */
+function troopUpkeep(v){ return (v.troops||[]).reduce((s,t)=>s+(t.count||0)*(t.upkeep||0),0); }
+function consumption(v){ return (v.baseConsumption||0)+troopUpkeep(v); }
+function routeFlows(){
+  const inn={}, out={};
+  state.villages.forEach(v=>{ inn[v.id]={lumber:0,clay:0,iron:0,crop:0}; out[v.id]={lumber:0,clay:0,iron:0,crop:0}; });
+  state.routes.forEach(r=>{
+    const interval = r.intervalHours>0 ? r.intervalHours : 1;
+    RES.forEach(k=>{ const perH=(r.resources&&r.resources[k]||0)/interval;
+      if(out[r.from]) out[r.from][k]+=perH; if(inn[r.to]) inn[r.to][k]+=perH; });
+  });
+  return {inn,out};
+}
+function netRates(v, flows){
+  const inn=flows.inn[v.id]||{}, out=flows.out[v.id]||{}, n={};
+  RES.forEach(k=>{ let base=(v.prod&&v.prod[k])||0; if(k==="crop") base-=consumption(v);
+    n[k]=base+(inn[k]||0)-(out[k]||0); });
+  return n;
+}
+function projected(v, flows){
+  const hrs=(Date.now()-(v.updatedAt||Date.now()))/3600000;
+  const net=netRates(v,flows);
+  const stored={lumber:(v.warehouse&&v.warehouse.lumber)||0,clay:(v.warehouse&&v.warehouse.clay)||0,
+    iron:(v.warehouse&&v.warehouse.iron)||0,crop:(v.granary&&v.granary.crop)||0};
+  const capW=(v.warehouse&&v.warehouse.capacity)||0, capG=(v.granary&&v.granary.capacity)||0;
+  const cap={lumber:capW,clay:capW,iron:capW,crop:capG}, cur={};
+  RES.forEach(k=>{ let val=stored[k]+net[k]*hrs; val=Math.max(0,Math.min(cap[k]||val,val)); cur[k]=val; });
+  return {cur,cap,net,hrs};
+}
+function dist(a,b){ const dx=(a.x||0)-(b.x||0),dy=(a.y||0)-(b.y||0); return Math.max(1,Math.sqrt(dx*dx+dy*dy)); }
+function effSpeed(v){ return (v.merchantSpeed||16)*(state.serverSpeed||1)*(1+((state.allianceBonus||0)/100)); }
+function effCap(v){
+  // Prefer the real per-merchant capacity read from the game (already includes server
+  // speed, Trade Office and alliance bonus). Fall back to the computed estimate.
+  if(v.merchantCapacityReal>0) return v.merchantCapacityReal;
+  const base=v.merchantCapacity||500, toRate=(v.tribe==="Romans"?20:10),
+  to=1+((v.tradeOfficeLevel||0)*toRate)/100, al=1+((state.allianceBonus||0)/100);
+  return base*(state.serverSpeed||1)*to*al; }
+// Trade ships (harbor): a second carrier fleet using the SHIP game constant (no Trade
+// Office bonus, but the alliance commerce bonus and server speed still apply).
+// Real per-ship cargo (read from the game) when available - it's per-village state
+// (harbor level + ship upgrades), not a clean formula. Falls back to the SHIP constant.
+function effShipCap(v){ if(v && v.shipCapacityReal>0) return v.shipCapacityReal; return SHIP.capacity*(state.serverSpeed||1)*(1+((state.allianceBonus||0)/100)); }
+function effShipSpeed(){ return SHIP.speed*(state.serverSpeed||1)*(1+((state.allianceBonus||0)/100)); }
+function maxShips(v){ return Math.max(0, v.tradeShips||0); }
+function maxMerchants(v){ const lvl=(v.marketplaceLevel||state.defaultMarket||0); return lvl>0?lvl:0; }
+// Carriers (merchants + ships) already tied up by existing routes. A route sending
+// every I h with a round-trip of T h keeps ceil(T/I) carriers in flight continuously
+// ("waves"), so during normal operation that many are unavailable for new routes.
+function committedCarriers(){
+  const m={};
+  state.routes.forEach(r=>{
+    const from=state.villages.find(v=>v.id===r.from), to=state.villages.find(v=>v.id===r.to);
+    if(!from||!to) return;
+    let merch=r.merchants, ships=r.ships||0;
+    if(merch==null){ // older routes without a stored carrier count: derive from round trip
+      const T=(2*dist(from,to))/effSpeed(from), I=Math.max(1,r.intervalHours||1);
+      const perSend=(r.resources&&(r.resources.lumber+r.resources.clay+r.resources.iron+r.resources.crop))||0;
+      merch=Math.max(1,Math.ceil(perSend/Math.max(1,effCap(from))))*Math.ceil(T/I);
+    }
+    const e=m[r.from]||(m[r.from]={merchants:0,ships:0});
+    e.merchants+=merch; e.ships+=ships;
+  });
+  return m;
+}
+function detectSpeed(s){ const m=String(s||"").match(/(?:^|[\s.\-\/])x(\d+)(?:[\s.\-]|$)/i); return m?+m[1]:null; }
+function detectServerSpeed(s){ const v=detectSpeed(s); if(v){ state.serverSpeed=v; save(); } return v; }
+// Carrier fleets available to a donor at distance d, richest-per-carrier first.
+// Each: {kind, avail, cap, T (round trip h), per (sustainable crop/h per carrier)}.
+function donorFleets(d,dst){
+  const v=d.v, out=[];
+  const Tm=(2*dst)/effSpeed(v);
+  out.push({kind:"merchant", avail:d.merchAvail, cap:effCap(v), T:Tm, per:effCap(v)/Tm});
+  if(d.shipAvail>0){ const Ts=(2*dst)/effShipSpeed(), Sc=effShipCap(d.v);
+    out.push({kind:"ship", avail:d.shipAvail, cap:Sc, T:Ts, per:Sc/Ts}); }
+  return out.sort((a,b)=>b.per-a.per); // fewest carriers per crop/h first
+}
+function hhmm(hours){ hours=Math.max(0,hours||0); const h=Math.floor(hours), m=Math.round((hours-h)*60); return (m===60?(h+1):h)+":"+String(m===60?0:m).padStart(2,"0"); }
+function hms(hours){
+  if(hours===Infinity||isNaN(hours)) return "&#8734;";
+  const h=Math.floor(hours), m=Math.floor((hours-h)*60);
+  if(h>48) return Math.floor(h/24)+"d "+(h%24)+"h";
+  return h+"h "+String(m).padStart(2,"0")+"m";
+}
+
+/* ---- command bar ---- */
+function renderCmd(){
+  const flows=routeFlows();
+  let totalCrop=0,draining=0,soonest=Infinity,soonestName="";
+  state.villages.forEach(v=>{ const p=projected(v,flows); totalCrop+=p.net.crop;
+    const incoming=(flows.inn[v.id]&&flows.inn[v.id].crop)||0;
+    if(p.net.crop<0){ draining++; if(incoming<=0){ const t=p.cur.crop/(-p.net.crop); if(t<soonest){soonest=t;soonestName=v.name;} } } });
+  const soonStr = soonest===Infinity ? "&mdash;" : hms(soonest);
+  document.getElementById("cmdbar").innerHTML = `
+    <div class="stat"><div class="lbl">Villages</div><div class="val">${state.villages.length}</div><div class="sub">${state.routes.length} active routes</div></div>
+    <div class="stat"><div class="lbl">Account crop / h</div><div class="val ${totalCrop>=0?'good':'bad'}">${signed(totalCrop)}</div><div class="sub">net across all villages</div></div>
+    <div class="stat"><div class="lbl">Villages draining</div><div class="val ${draining?'warn':'good'}">${draining}</div><div class="sub">crop deficit right now</div></div>
+    <div class="stat"><div class="lbl">Soonest starvation</div><div class="val ${soonest<24?'bad':soonest===Infinity?'good':'warn'}">${soonStr}</div><div class="sub">${esc(soonestName)||'all stable'}</div></div>`;
+}
+
+/* ---- dashboard ---- */
+function renderDash(){
+  const el=document.getElementById("tab-dash");
+  if(!state.villages.length){ el.innerHTML=`<div class="empty"><h3>No villages yet</h3><p>Add a village manually, use Paste from game, or Import / Sync.</p><button class="primary" onclick="openVillage()">+ Add village</button></div>`; return; }
+  const flows=routeFlows();
+  el.innerHTML=`<div class="vgrid">${state.villages.map(v=>vcard(v,flows)).join("")}</div>`;
+}
+function vcard(v,flows){
+  const p=projected(v,flows), net=p.net.crop;
+  const incoming=(flows.inn[v.id]&&flows.inn[v.id].crop)||0;
+  let clock,cls="";
+  if(net<0){
+    const tte=p.cur.crop/(-net);
+    if(incoming>0){ clock=`<div class="clock over">&#128230; Merchants en route &mdash; would empty in ${hms(tte)} without them</div>`; cls="over"; }
+    else if(tte<1){ clock=`<div class="clock bad">&#9888; STARVING &mdash; granary empty in ${hms(tte)}</div>`; cls="crit"; }
+    else { clock=`<div class="clock over">Draining &mdash; empty in ${hms(tte)}</div>`; cls="over"; }
+  }
+  else if(net>0){ const room=p.cap.crop-p.cur.crop; clock=`<div class="clock over">Granary full in ${hms(room/net)} &mdash; overflow waste</div>`; cls="over"; }
+  else clock=`<div class="clock ok">Crop balanced</div>`;
+  const bar=(k,label)=>{ const pct=p.cap[k]?Math.min(100,p.cur[k]/p.cap[k]*100):0;
+    return `<div class="bar"><span style="color:var(--${k})">${label}</span><div class="track"><div class="fill f-${k}" style="width:${pct}%"></div></div><span class="num">${fmt(p.cur[k])}/${fmt(p.cap[k])}</span></div>`; };
+  return `<div class="vcard ${cls}">
+    <div class="vhead"><span class="name">${esc(v.name)}</span><span class="coord">(${v.x||0}|${v.y||0})</span><span class="grow"></span><span class="tribe">${esc(v.tribe)}</span></div>
+    ${clock}
+    <div class="bars">${bar("lumber","Lmbr")}${bar("clay","Clay")}${bar("iron","Iron")}${bar("crop","Crop")}</div>
+    <div class="vmeta"><span>Net crop: <span class="netcrop" style="color:var(--${net>=0?'ok':'bad'})">${signed(net)}/h</span>${v.synced?'<span class="synced">synced</span>':''}</span><span>Upkeep: ${fmt(consumption(v))}/h</span></div>
+    <div class="vactions"><button class="sm" onclick="openVillage('${v.id}')">Edit / re-snapshot</button><button class="sm danger" onclick="delVillage('${v.id}')">Delete</button></div>
+  </div>`;
+}
+
+/* ---- optimizer ---- */
+function renderOptimizer(){
+  const el=document.getElementById("tab-optimizer");
+  if(state.villages.length<2){ el.innerHTML=`<div class="empty"><h3>Need at least 2 villages</h3><p>The optimizer moves surplus crop to villages that are draining.</p></div>`; return; }
+  const plan=optimize();
+  el.innerHTML=`
+    <div class="opt-controls">
+      <strong>&#9889; Auto crop balancer</strong>
+      <label>Resource:
+        <select onchange="optMode=this.value;renderOptimizer()">
+          <option value="crop" ${optMode==='crop'?'selected':''}>Crop only (anti-starvation)</option>
+          <option value="all" ${optMode==='all'?'selected':''}>Crop + balance overflow</option>
+        </select></label>
+      <label title="Crop/h to leave as a buffer in each surplus village before it donates">Keep buffer /h: <input type="number" value="${optMargin}" style="width:64px" onchange="optMargin=+this.value;renderOptimizer()"></label>
+      <label title="Smallest route worth creating - fewer, larger routes">Min route /h: <input type="number" value="${optMinRoute}" style="width:64px" onchange="optMinRoute=+this.value;renderOptimizer()"></label>
+      <label title="Auto-detected from the server name (e.g. x2)">Server speed: <b style="color:var(--accent);margin-left:4px">&times;${state.serverSpeed||1}</b></label>
+      <label title="Alliance commerce bonus % to merchant capacity">Alliance trade %: <input type="number" value="${state.allianceBonus||0}" style="width:60px" onchange="state.allianceBonus=+this.value||0;save();renderAll()"></label>
+      <label title="Merchants per village if not set individually (= marketplace level)">Default market lvl: <input type="number" value="${state.defaultMarket||0}" style="width:56px" onchange="state.defaultMarket=+this.value||0;save();renderAll()"></label>
+      <label>Server URL: <input type="text" value="${esc(state.serverUrl||'')}" placeholder="https://rof.x2.europe.travian.com" style="width:220px" onchange="state.serverUrl=this.value.trim().replace(/\/+$/,'');detectServerSpeed(state.serverUrl);renderAll()"></label>
+      <div class="grow"></div>
+      <button class="primary" onclick="applyPlan()" ${plan.routes.length?'':'disabled'}>Apply ${plan.routes.length} route${plan.routes.length===1?'':'s'}</button>
+    </div>
+    <p class="note">${plan.summary}</p>
+    ${plan.routes.length ? planTable(plan) : `<div class="empty"><h3>${plan.balanced?'&#9989; Account is balanced':plan.merchantBlocked?'&#9650; No merchants available':'No feasible routes'}</h3><p>${plan.balanced?'No village is starving, or no donor has spare crop after the safety margin.':plan.merchantBlocked?'Donors have spare crop, but their Marketplace level gives 0 free merchants (or all are tied up by existing routes). Set each village&rsquo;s Marketplace level, or the Default market lvl above.':'Deficit villages exist but no donor has spare crop. Reduce upkeep, raise crop fields, or NPC-trade.'}</p></div>`}
+    ${plan.unmet.length?`<p class="note">&#9888; Still uncovered: ${plan.unmet.map(u=>esc(u.name)+" ("+fmt(u.need)+"/h short)").join(", ")}. ${
+      plan.spareCrop>0 && plan.spareCarriers<=0
+        ? "<b>Carrier-limited:</b> donors still hold "+fmt(plan.spareCrop)+" crop/h of surplus but have no free merchants/ships left. Raise Marketplace levels, add trade ships, or raise the Default market lvl."
+        : plan.spareCrop>0
+          ? "Remaining surplus is too far / too small per donor to form a route above Min route /h ("+fmt(optMinRoute)+"). Lower Min route /h to use it."
+          : "Donors are out of spare crop above the Keep buffer ("+fmt(optMargin)+"/h)."
+    }</p>`:""}`;
+}
+function planTable(plan){
+  return `<table><thead><tr>
+    <th>From (surplus)</th><th>To (deficit)</th><th class="num">Per send</th><th class="num">Every</th><th class="num">Crop/h</th><th class="num">Dist</th><th class="num">Carriers</th><th class="num">Offset</th><th>Impact</th><th></th>
+    </tr></thead><tbody>
+    ${plan.routes.map(r=>{ const sl=sendLink(state.villages.find(v=>v.id===r.from),state.villages.find(v=>v.id===r.to),r.perSend);
+      const carriers=`${r.merchants}&#128722;`+(r.ships?` + ${r.ships}&#9973;`:"")+(r.merchCapped?' <span style="color:var(--warn)" title="Limited by available carriers">&#9650;</span>':"");
+      return `<tr><td>${esc(r.fromName)}</td><td>${esc(r.toName)}</td><td class="num">${fmt(r.perSend)}</td><td class="num">${r.interval}h</td><td class="num">${fmt(r.cropPerHour)}</td><td class="num">${fmt(r.distance)}</td><td class="num" title="${r.merchants} merchants${r.ships?(' + '+r.ships+' trade ships'):''}">${carriers}</td><td class="num">${hhmm(r.offsetHours||0)}</td><td><span class="imp">${r.impact}</span></td><td>${sl?'<a href="'+sl+'" target="_blank" style="color:var(--accent)">Send &#8599;</a>':''}</td></tr>`;}).join("")}
+    </tbody></table>
+    <p class="note">Read as: ship <b>Per send</b> crop <b>Every</b> interval using the <b>Carriers</b> shown (&#128719; merchants + &#9973; trade ships). Interval = round-trip so carriers recycle; a village draining faster than that forces shorter intervals &amp; overlapping waves (more carriers). &#9650; = capped by available carriers. <b>Send &#8599;</b> opens the marketplace pre-filled.</p>`;
+}
+function sendLink(fromV,toV,crop){
+  if(!state.serverUrl||!fromV||!fromV.did||!toV) return "";
+  return state.serverUrl.replace(/\/+$/,"")+"/build.php?newdid="+fromV.did+"&gid=17&t=5&x="+(toV.x||0)+"&y="+(toV.y||0)+"&r1=0&r2=0&r3=0&r4="+Math.max(0,Math.round(crop));
+}
+function optimize(){
+  const flows=routeFlows();
+  const data=state.villages.map(v=>{ const p=projected(v,flows); return {v,net:p.net.crop,crop:p.cur.crop,capRoom:p.cap.crop-p.cur.crop}; });
+  const committed=committedCarriers();
+  let donors=data.filter(d=>d.net-optMargin>0).map(d=>{
+    const c=committed[d.v.id]||{merchants:0,ships:0};
+    return {...d, avail:d.net-optMargin,
+      merchAvail:Math.max(0,maxMerchants(d.v)-c.merchants),
+      shipAvail:Math.max(0,maxShips(d.v)-c.ships)};
+  });
+  let receivers=data.filter(d=>d.net<0).map(d=>({...d,need:-d.net,eta:d.crop/(-d.net)})).sort((a,b)=>a.eta-b.eta);
+  const balanced=receivers.length===0, routes=[], unmet=[];
+  const hadDonors=donors.length>0, freeCarriers=donors.reduce((s,d)=>s+d.merchAvail+d.shipAvail,0);
+  // Batch model: send "perSend" crop every "interval" h. Interval is as long as possible
+  // (=round trip, so carriers recycle) but short enough to arrive before the granary empties.
+  // If the village drains faster than carriers return, waves overlap => more carriers needed.
+  // Travian trade routes use a WHOLE-hour interval 1..24. Pick the largest such interval
+  // that (a) is near the round trip for carrier efficiency, (b) arrives before the granary
+  // empties, and (c) doesn't overflow the destination granary in one batch.
+  function chooseInterval(T,eta,freeSpace,F){
+    let I=Math.max(1,Math.round(T));
+    if(eta>0) I=Math.min(I, Math.floor(eta));
+    if(F>0 && freeSpace>0) I=Math.min(I, Math.floor(freeSpace/F));
+    return Math.max(1, Math.min(24, I||1));
+  }
+  // What this donor can actually deliver to rec (probe; allocate does not mutate state).
+  function maxFlow(d,rec){ return allocate(d, dist(d.v,rec.v), rec, Math.min(rec.need, d.avail)).F; }
+  // Fill a flow target from a donor's fleets (richest carrier first), respecting whole-hour
+  // intervals and per-fleet availability. Returns delivered crop/h plus carriers tied up.
+  function allocate(d,dst,rec,target){
+    const fleets=donorFleets(d,dst);
+    const Tfast=fleets.reduce((m,f)=>Math.min(m,f.T), Infinity);
+    const I=chooseInterval(Tfast, rec.crop/Math.max(1,rec.need), rec.capRoom, target);
+    let remaining=target, F=0, mUsed=0, sUsed=0, capped=false;
+    for(const f of fleets){
+      if(remaining<=0.5 || f.avail<=0) continue;
+      const want=Math.min(remaining, f.avail*f.per), waves=Math.ceil(f.T/I);
+      let cPerSend=Math.max(1,Math.ceil((want*I)/f.cap)), conc=cPerSend*waves;
+      if(conc>f.avail){ capped=true; cPerSend=Math.floor(f.avail/waves); conc=cPerSend*waves; }
+      if(cPerSend<1) continue;
+      const got=Math.min((cPerSend*f.cap)/I, want);
+      F+=got; remaining-=got;
+      if(f.kind==="ship") sUsed+=conc; else mUsed+=conc;
+    }
+    return {F, I, mUsed, sUsed, capped, roundTrip:Tfast};
+  }
+  receivers.forEach(rec=>{
+    let need=rec.need;
+    const capable=donors.filter(d=>maxFlow(d,rec)>=need-1).map(d=>({d,dst:dist(d.v,rec.v)})).sort((a,b)=>a.dst-b.dst);
+    const pool = capable.length ? [capable[0]]
+               : donors.filter(d=>maxFlow(d,rec)>=optMinRoute).map(d=>({d,dst:dist(d.v,rec.v)})).sort((a,b)=>a.dst-b.dst);
+    for(const {d,dst} of pool){
+      if(need<=1) break;
+      const a=allocate(d, dst, rec, Math.min(need, d.avail));
+      const F=a.F;
+      if(F<1) continue; // no carriers free for even one wave
+      if(F<optMinRoute && F<need-1) continue; // route penalty: avoid tiny splits
+      const perSend=Math.round(F*a.I);
+      routes.push({from:d.v.id,to:rec.v.id,fromName:d.v.name,toName:rec.v.name,
+        cropPerHour:F, perSend, interval:a.I, distance:Math.round(dst),
+        merchants:a.mUsed, ships:a.sUsed, roundTrip:a.roundTrip, merchCapped:a.capped,
+        impact:(need-F<=1)?"deficit fully covered":"&minus;"+fmt(F)+"/h drain"});
+      d.avail-=F; d.merchAvail-=a.mUsed; d.shipAvail-=a.sUsed; need-=F;
+    }
+    if(need>1) unmet.push({name:rec.v.name,need});
+  });
+  // Stagger send offsets per source so carriers aren't all out at once.
+  const bySrc={}; routes.forEach(r=>{ (bySrc[r.from]=bySrc[r.from]||[]).push(r); });
+  Object.keys(bySrc).forEach(k=>{ const list=bySrc[k], n=list.length; list.forEach((r,i)=>{ r.offsetHours=+(((r.interval||1)*i)/Math.max(1,n)).toFixed(3); }); });
+  const spareCrop=donors.reduce((s,d)=>s+Math.max(0,d.avail),0);
+  const spareCarriers=donors.reduce((s,d)=>s+Math.max(0,d.merchAvail)+Math.max(0,d.shipAvail),0);
+  const merchantBlocked = !balanced && !routes.length && hadDonors && freeCarriers<=0;
+  let summary;
+  if(balanced) summary="Every village has non-negative crop. Nothing to balance.";
+  else if(routes.length) summary=`${routes.length} route${routes.length>1?'s':''} proposed: moving ${fmt(routes.reduce((s,r)=>s+r.cropPerHour,0))} crop/h from ${new Set(routes.map(r=>r.from)).size} surplus to ${new Set(routes.map(r=>r.to)).size} draining village(s).`;
+  else if(merchantBlocked) summary="Donors have spare crop but no free carriers. Set Marketplace levels / trade ships (or the Default market lvl) - routes aren't suggested with 0 available carriers.";
+  else summary="Draining villages exist, but no donor has spare crop above the safety margin.";
+  return {routes,unmet,balanced,summary,merchantBlocked,spareCrop:Math.round(spareCrop),spareCarriers};
+}
+function applyPlan(){
+  const plan=optimize();
+  plan.routes.forEach(r=>state.routes.push({id:uid(),from:r.from,to:r.to,
+    resources:{lumber:0,clay:0,iron:0,crop:r.perSend},
+    intervalHours:r.interval,merchants:r.merchants,ships:r.ships||0,offsetHours:r.offsetHours||0,auto:true}));
+  save(); setTab("routes");
+}
+
+/* ---- routes tab ---- */
+function renderRoutes(){
+  const el=document.getElementById("tab-routes");
+  const head=`<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px"><p class="note" style="margin:0">Hourly flow = <code>resources &divide; interval</code>. Routes feed dashboard projections.</p><button class="primary" onclick="openRoute()" ${state.villages.length<2?'disabled':''}>+ Route</button></div>`;
+  if(!state.routes.length){ el.innerHTML=head+`<div class="empty"><h3>No routes</h3><p>Add one manually, or let <b>Auto Routes &#9889;</b> build a crop-balancing plan.</p></div>`; return; }
+  const name=id=>{ const v=state.villages.find(v=>v.id===id); return v?v.name:"?"; };
+  el.innerHTML=head+`<table><thead><tr><th>From</th><th>To</th><th class="num">Lumber</th><th class="num">Clay</th><th class="num">Iron</th><th class="num">Crop</th><th class="num">Interval</th><th class="num">Crop/h</th><th class="num">Merchants</th><th></th></tr></thead><tbody>
+  ${state.routes.map(r=>{ const cph=(r.resources&&r.resources.crop||0)/(r.intervalHours||1);
+    return `<tr><td>${esc(name(r.from))}</td><td>${esc(name(r.to))}</td><td class="num">${fmt(r.resources&&r.resources.lumber||0)}</td><td class="num">${fmt(r.resources&&r.resources.clay||0)}</td><td class="num">${fmt(r.resources&&r.resources.iron||0)}</td><td class="num">${fmt(r.resources&&r.resources.crop||0)}</td><td class="num">${Math.round(r.intervalHours)}h${r.offsetHours?(" @"+hhmm(r.offsetHours)):""}</td><td class="num" style="color:var(--crop)">${signed(cph)}</td><td class="num">${r.merchants||"&mdash;"} ${r.auto?'<span class="pill ok">auto</span>':''}</td><td class="num">${(()=>{const sl=sendLink(state.villages.find(v=>v.id===r.from),state.villages.find(v=>v.id===r.to),(r.resources&&r.resources.crop)||0);return sl?'<a href="'+sl+'" target="_blank" style="color:var(--accent);margin-right:6px">Send</a>':'';})()}<button class="sm" onclick="openRoute('${r.id}')">&#9998;</button> <button class="sm danger" onclick="delRoute('${r.id}')">&#10005;</button></td></tr>`;
+  }).join("")}</tbody></table>`;
+}
+
+/* ---- village modal ---- */
+function openVillage(id){
+  editingV = id ? state.villages.find(v=>v.id===id) : null;
+  const v = editingV || {tribe:"Romans",prod:{},warehouse:{},granary:{},troops:[]};
+  document.getElementById("vModalTitle").textContent = editingV ? "Edit "+v.name : "Add Village";
+  const t=TRIBES[v.tribe]||TRIBES.Romans;
+  const num=(lbl,id,val,ph="0")=>`<div class="field"><label>${lbl}</label><input type="number" id="${id}" value="${val==null?'':val}" placeholder="${ph}"></div>`;
+  document.getElementById("vForm").innerHTML=`
+    <div class="field full"><label>Village name</label><input id="f_name" value="${esc(v.name||'')}" placeholder="Capital"></div>
+    <div class="field"><label>Tribe</label><select id="f_tribe" onchange="syncMerchant()">${Object.keys(TRIBES).map(x=>`<option ${v.tribe===x?'selected':''}>${x}</option>`).join("")}</select></div>
+    <div class="field"><label>Coordinates X | Y</label><div style="display:flex;gap:6px"><input type="number" id="f_x" value="${v.x==null?'':v.x}" placeholder="X" style="width:50%"><input type="number" id="f_y" value="${v.y==null?'':v.y}" placeholder="Y" style="width:50%"></div></div>
+    <div class="sect">Production /h</div>
+    ${num("Lumber","f_pl",v.prod&&v.prod.lumber)}${num("Clay","f_pc",v.prod&&v.prod.clay)}
+    ${num("Iron","f_pi",v.prod&&v.prod.iron)}${num("Crop (net if synced)","f_pcr",v.prod&&v.prod.crop)}
+    <div class="sect">Consumption & storage</div>
+    ${num("Base crop upkeep /h","f_base",v.baseConsumption,"troop upkeep")}
+    <div class="field"><label>Granary capacity</label><input type="number" id="f_gcap" value="${v.granary&&v.granary.capacity!=null?v.granary.capacity:''}" placeholder="80000"></div>
+    ${num("Warehouse capacity","f_wcap",v.warehouse&&v.warehouse.capacity,"80000")}
+    ${num("Current crop","f_gcur",v.granary&&v.granary.crop)}
+    ${num("Current lumber","f_wl",v.warehouse&&v.warehouse.lumber)}${num("Current clay","f_wc",v.warehouse&&v.warehouse.clay)}
+    ${num("Current iron","f_wi",v.warehouse&&v.warehouse.iron)}<div class="field"></div>
+    <div class="sect">Merchants (base values; server speed &amp; bonuses applied automatically)</div>
+    ${num("Base merchant capacity","f_mcap",v.merchantCapacity==null?t.merchantCapacity:v.merchantCapacity)}
+    ${num("Base merchant speed (fields/h)","f_mspd",v.merchantSpeed==null?t.merchantSpeed:v.merchantSpeed)}
+    ${num("Trade Office level","f_to",v.tradeOfficeLevel,"0-20")}
+    ${num("Marketplace level","f_mkt",v.marketplaceLevel,"= max merchants")}
+    <div class="sect">Trade ships (harbor) &mdash; ${SHIP.capacity}/ship at ${SHIP.speed} fields/h (game constant; alliance bonus applies)</div>
+    ${num("Trade ships","f_ships",v.tradeShips,"0 = no harbor")}<div class="field"></div>
+    <div class="sect">Troops (count &times; upkeep auto-sums into crop consumption)</div>
+    <div class="field full" id="troopBox"></div>
+    <div class="field full"><button class="sm" onclick="addTroopRow()">+ troop type</button></div>`;
+  optTroopRows=(v.troops||[]).map(x=>({...x}));
+  renderTroopRows();
+  document.getElementById("vOverlay").classList.add("show");
+}
+function syncMerchant(){ const t=TRIBES[document.getElementById("f_tribe").value]; if(t){ document.getElementById("f_mcap").value=t.merchantCapacity; document.getElementById("f_mspd").value=t.merchantSpeed; } }
+function renderTroopRows(){
+  document.getElementById("troopBox").innerHTML = optTroopRows.map((t,i)=>`
+    <div class="troop-row" style="margin-bottom:6px">
+      <input placeholder="Unit" value="${esc(t.type||'')}" oninput="optTroopRows[${i}].type=this.value">
+      <input type="number" placeholder="count" value="${t.count==null?'':t.count}" oninput="optTroopRows[${i}].count=+this.value">
+      <input type="number" placeholder="upkeep" value="${t.upkeep==null?'':t.upkeep}" oninput="optTroopRows[${i}].upkeep=+this.value">
+      <button class="sm danger" onclick="optTroopRows.splice(${i},1);renderTroopRows()">&#10005;</button>
+    </div>`).join("") || `<span class="note">No troops added.</span>`;
+}
+function addTroopRow(){ optTroopRows.push({type:"",count:0,upkeep:0}); renderTroopRows(); }
+function saveVillage(){
+  const g=id=>document.getElementById(id), num=id=>+g(id).value||0;
+  const v={ id:(editingV&&editingV.id)||uid(), name:g("f_name").value.trim()||"Village", tribe:g("f_tribe").value,
+    x:num("f_x"),y:num("f_y"),
+    prod:{lumber:num("f_pl"),clay:num("f_pc"),iron:num("f_pi"),crop:num("f_pcr")},
+    baseConsumption:num("f_base"), troops:optTroopRows.filter(t=>t.type||t.count),
+    warehouse:{capacity:num("f_wcap"),lumber:num("f_wl"),clay:num("f_wc"),iron:num("f_wi")},
+    granary:{capacity:num("f_gcap"),crop:num("f_gcur")},
+    merchantCapacity:num("f_mcap"),merchantSpeed:num("f_mspd"),tradeOfficeLevel:num("f_to"),marketplaceLevel:num("f_mkt"),
+    tradeShips:num("f_ships"),
+    synced:editingV?editingV.synced:false, did:editingV?editingV.did:0, updatedAt:Date.now() };
+  if(editingV){ const i=state.villages.findIndex(x=>x.id===v.id); state.villages[i]=v; }
+  else state.villages.push(v);
+  save(); closeVillage(); renderAll();
+}
+function delVillage(id){
+  if(!confirm("Delete this village and its routes?")) return;
+  state.villages=state.villages.filter(v=>v.id!==id);
+  state.routes=state.routes.filter(r=>r.from!==id&&r.to!==id);
+  save(); renderAll();
+}
+function closeVillage(){ document.getElementById("vOverlay").classList.remove("show"); }
+
+/* ---- route modal ---- */
+function openRoute(id){
+  editingR = id ? state.routes.find(r=>r.id===id) : null;
+  const r=editingR||{resources:{},intervalHours:1};
+  document.getElementById("rModalTitle").textContent=editingR?"Edit Route":"Add Trade Route";
+  const opts=sel=>state.villages.map(v=>`<option value="${v.id}" ${sel===v.id?'selected':''}>${esc(v.name)}</option>`).join("");
+  document.getElementById("rForm").innerHTML=`
+    <div class="field"><label>From</label><select id="r_from">${opts(r.from)}</select></div>
+    <div class="field"><label>To</label><select id="r_to">${opts(r.to)}</select></div>
+    <div class="sect">Resources per shipment</div>
+    <div class="field"><label>Lumber</label><input type="number" id="r_l" value="${r.resources&&r.resources.lumber||0}"></div>
+    <div class="field"><label>Clay</label><input type="number" id="r_c" value="${r.resources&&r.resources.clay||0}"></div>
+    <div class="field"><label>Iron</label><input type="number" id="r_i" value="${r.resources&&r.resources.iron||0}"></div>
+    <div class="field"><label>Crop</label><input type="number" id="r_cr" value="${r.resources&&r.resources.crop||0}"></div>
+    <div class="field"><label>Interval (hours between waves)</label><input type="number" step="1" min="1" max="24" id="r_int" value="${Math.round(r.intervalHours)||1}"></div>
+    <div class="field"><label>Merchants</label><input type="number" id="r_m" value="${r.merchants||1}"></div>`;
+  document.getElementById("rOverlay").classList.add("show");
+}
+function saveRoute(){
+  const g=id=>document.getElementById(id), num=id=>+g(id).value||0;
+  const r={ id:(editingR&&editingR.id)||uid(), from:g("r_from").value, to:g("r_to").value,
+    resources:{lumber:num("r_l"),clay:num("r_c"),iron:num("r_i"),crop:num("r_cr")},
+    intervalHours:Math.max(1,Math.min(24,Math.round(num("r_int"))||1)), merchants:num("r_m") };
+  if(r.from===r.to){ alert("From and To must differ."); return; }
+  if(editingR){ const i=state.routes.findIndex(x=>x.id===r.id); state.routes[i]=r; }
+  else state.routes.push(r);
+  save(); closeRoute(); renderAll();
+}
+function delRoute(id){ state.routes=state.routes.filter(r=>r.id!==id); save(); renderAll(); }
+function closeRoute(){ document.getElementById("rOverlay").classList.remove("show"); }
+
+/* ---- import / export / sync-merge ---- */
+function exportJSON(){
+  const blob=new Blob([JSON.stringify(state,null,2)],{type:"application/json"});
+  const a=document.createElement("a"); a.href=URL.createObjectURL(blob); a.download="travian-data.json"; a.click();
+}
+// Copy the retrieval script so it can be pasted into the game's console.
+function pullFromGame(){
+  const code=((document.getElementById('gamePullScript')||{}).textContent||'').trim();
+  const steps="Pull live data from the game:\n\n"
+    +"1) Open your Travian game world tab and log in.\n"
+    +"2) Press F12, open the Console tab.\n"
+    +"3) Paste (Ctrl+V) and press Enter.\n"
+    +"4) It downloads travian-carrier-data.json.\n"
+    +"5) Come back here and click Import / Sync, choose that file.";
+  const ok=()=>alert("✓ Script copied to clipboard.\n\n"+steps);
+  if(navigator.clipboard&&navigator.clipboard.writeText){
+    navigator.clipboard.writeText(code).then(ok,()=>window.prompt(steps+"\n\nCopy the script below:",code));
+  } else { window.prompt(steps+"\n\nCopy the script below:",code); }
+}
+function importJSON(e){
+  const f=e.target.files[0]; if(!f) return;
+  const rd=new FileReader();
+  rd.onload=()=>{ try{ const d=JSON.parse(rd.result);
+    if(!d.villages){ alert("Unrecognized file."); return; }
+    if(d.source==="travian-sync"){ mergeSync(d.villages); }
+    else if(confirm("Import "+d.villages.length+" villages.\n\nOK = MERGE into current data (keeps routes & manual troops).\nCancel = REPLACE everything.")){ mergeSync(d.villages); }
+    else { state=d; if(!state.routes) state.routes=[]; ensureIds(state.villages); save(); renderAll(); }
+  }catch(err){ alert("Invalid JSON."); } };
+  rd.readAsText(f); e.target.value="";
+}
+function mergeSync(incoming, silent){
+  const key=v=>(v.x||0)+"|"+(v.y||0); // match by coordinates so in-game renames update in place
+  let updated=0, added=0;
+  incoming.forEach(nv=>{
+    const ex=state.villages.find(v=>key(v)===key(nv));
+    if(ex){
+      if(nv.name) ex.name=nv.name;   // adopt the current in-game name
+      ex.prod=Object.assign({},ex.prod,nv.prod);
+      ex.warehouse=Object.assign({},ex.warehouse,nv.warehouse);
+      ex.granary=Object.assign({},ex.granary,nv.granary);
+      ex.tribe=nv.tribe||ex.tribe;
+      if(nv.did) ex.did=nv.did;
+      if(nv.baseConsumption!=null) ex.baseConsumption=nv.baseConsumption;
+      if(nv.marketplaceLevel!=null) ex.marketplaceLevel=nv.marketplaceLevel;   // carrier count
+      if(nv.tradeOfficeLevel!=null) ex.tradeOfficeLevel=nv.tradeOfficeLevel;
+      if(nv.merchantCapacityReal!=null) ex.merchantCapacityReal=nv.merchantCapacityReal; // real per-merchant capacity
+      if(nv.tradeShips!=null) ex.tradeShips=nv.tradeShips;
+      if(nv.shipCapacityReal!=null) ex.shipCapacityReal=nv.shipCapacityReal; // real per-trade-ship cargo
+      if(nv.synced){ ex.synced=true; ex.troops=[]; }
+      ex.updatedAt=nv.updatedAt||Date.now();
+      updated++;
+    } else {
+      const t=TRIBES[nv.tribe]||TRIBES.Romans;
+      state.villages.push({ id:uid(), name:nv.name||"Village", tribe:nv.tribe||"Romans",
+        x:nv.x||0, y:nv.y||0, prod:nv.prod||{}, baseConsumption:nv.baseConsumption||0,
+        troops:nv.troops||[], warehouse:nv.warehouse||{}, granary:nv.granary||{},
+        merchantCapacity:nv.merchantCapacity||t.merchantCapacity,
+        merchantSpeed:nv.merchantSpeed||t.merchantSpeed,
+        tradeOfficeLevel:nv.tradeOfficeLevel||0, marketplaceLevel:nv.marketplaceLevel||0, did:nv.did||0,
+        merchantCapacityReal:nv.merchantCapacityReal||0, tradeShips:nv.tradeShips||0,
+        shipCapacityReal:nv.shipCapacityReal||0,
+        synced:!!nv.synced, updatedAt:nv.updatedAt||Date.now() });
+      added++;
+    }
+  });
+  ensureIds(state.villages);
+  dedupeAndSort(state); // collapse any rename-duplicates and re-order
+  save(); renderAll();
+  if(!silent) alert("Sync complete - "+updated+" updated, "+added+" added.\nRoutes and manual troop data preserved.");
+  return {updated, added};
+}
+// Entry point the Tampermonkey bridge calls to push live game data in silently.
+// Accepts a JSON string or object; returns a short status string.
+function applySyncedData(data){
+  try{
+    const d = (typeof data==="string") ? JSON.parse(data) : data;
+    if(!d || !d.villages) return "no villages";
+    const r = mergeSync(d.villages, true);
+    return "synced "+d.villages.length+" villages ("+r.updated+" updated, "+r.added+" added)";
+  }catch(e){ console.warn("applySyncedData failed", e); return "error: "+e.message; }
+}
+window.applySyncedData = applySyncedData;
+
+/* ---- paste-from-game parser (Warehouse stats page source) ---- */
+function openPaste(){ document.getElementById("pasteBox").value=""; document.getElementById("pastePreview").innerHTML=""; document.getElementById("pImportBtn").disabled=true; pasteResults=[]; document.getElementById("pOverlay").classList.add("show"); }
+function closePaste(){ document.getElementById("pOverlay").classList.remove("show"); }
+function pStrip(s){ return String(s==null?"":s).replace(/[‪-‮⁦-⁩‎‏؜]/g,"").replace(/−/g,"-"); }
+function pPair(td){ if(!td) return null; const t=pStrip(td.getAttribute("title")||""); const m=t.match(/(-?\d+)\s*\/\s*(-?\d+)/); return m?{cur:+m[1],cap:+m[2]}:null; }
+function parseGamePaste(html){
+  const res=[], coordMap={};
+  const re=/"name":"((?:[^"\\]|\\.)*)","distance":[0-9.]+[\s\S]*?"x":(-?\d+),"y":(-?\d+)/g; let m;
+  while((m=re.exec(html))){ coordMap[m[1].toLowerCase()]={x:+m[2],y:+m[3]}; }
+  let doc; try{ doc=new DOMParser().parseFromString(html,"text/html"); }catch(e){ return res; }
+  const table=doc.querySelector("#warehouse")||doc.querySelector("table");
+  if(table){
+    table.querySelectorAll("tbody tr").forEach(tr=>{
+      const a=tr.querySelector("td.vil a")||tr.querySelector(".vil a"); if(!a) return;
+      const name=pStrip(a.textContent).trim(); if(!name) return;
+      const hm=(a.getAttribute("href")||"").match(/newdid=(\d+)/); const did=hm?+hm[1]:0;
+      const lum=pPair(tr.querySelector("td.lum")), clay=pPair(tr.querySelector("td.clay")), iron=pPair(tr.querySelector("td.iron")), crop=pPair(tr.querySelector("td.crop"));
+      const gran=tr.querySelector("td.max4"); const crit=!!(gran&&gran.querySelector(".crit"));
+      const timer=gran?gran.querySelector(".timer"):null; const secs=timer?+timer.getAttribute("value"):0;
+      let netCrop=0;
+      if(crop&&secs>0){ netCrop = crit ? -(crop.cur/secs)*3600 : ((crop.cap-crop.cur)/secs)*3600; }
+      const co=coordMap[name.toLowerCase()]||{x:0,y:0};
+      res.push({ name, x:co.x, y:co.y, did,
+        prod:{lumber:0,clay:0,iron:0,crop:Math.round(netCrop)}, baseConsumption:0,
+        warehouse:{capacity:lum?lum.cap:0,lumber:lum?lum.cur:0,clay:clay?clay.cur:0,iron:iron?iron.cur:0},
+        granary:{capacity:crop?crop.cap:0,crop:crop?crop.cur:0}, synced:true });
+    });
+  }
+  const rm=html.match(/var\s+resources\s*=\s*\{[\s\S]*?\};/);
+  if(rm){
+    try{
+      const pm=rm[0].match(/production:\s*(\{[^}]*\})/);
+      const prod=pm?JSON.parse(pm[1]):null;
+      const av=doc.querySelector(".villageInput");
+      const an=pStrip(av?av.value:((doc.querySelector(".listEntry.active .name")||{}).textContent||"")).trim();
+      const t=res.find(v=>v.name.toLowerCase()===an.toLowerCase());
+      if(t&&prod){ t.prod.lumber=prod.l1; t.prod.clay=prod.l2; t.prod.iron=prod.l3; t.prod.crop=prod.l5; t.baseConsumption=Math.max(0,prod.l5-prod.l4); }
+    }catch(e){}
+  }
+  return res;
+}
+function parsePastePreview(){
+  const _raw=document.getElementById("pasteBox").value;
+  const _t=(_raw.match(/<title>([^<]*)<\/title>/i)||[])[1]||"";
+  const _sp=detectSpeed(_t)||detectSpeed(state.serverUrl); if(_sp){ state.serverSpeed=_sp; save(); }
+  pasteResults=parseGamePaste(_raw);
+  const pv=document.getElementById("pastePreview");
+  if(!pasteResults.length){ pv.innerHTML='<span style="color:var(--bad)">No villages found. Paste the <b>Warehouse</b> stats page source (Ctrl+U).</span>'; document.getElementById("pImportBtn").disabled=true; return; }
+  pv.innerHTML='<b style="color:var(--ok)">'+pasteResults.length+' villages found</b> &middot; server speed &times;'+(state.serverSpeed||1)+'<br>'+pasteResults.map(v=>{ const net=(v.prod.crop||0)-(v.baseConsumption||0); return esc(v.name)+" ("+v.x+"|"+v.y+") &mdash; net crop <span style=\"color:var(--"+(net>=0?'ok':'bad')+")\">"+signed(net)+"</span>/h, granary "+fmt(v.granary.crop)+"/"+fmt(v.granary.capacity); }).join("<br>");
+  document.getElementById("pImportBtn").disabled=false;
+}
+function importPaste(){ if(!pasteResults.length) return; mergeSync(pasteResults); closePaste(); }
+
+/* ---- shell ---- */
+function setTab(t){
+  tab=t;
+  document.querySelectorAll(".tabs button").forEach(b=>b.classList.toggle("active",b.dataset.tab===t));
+  ["dash","optimizer","routes"].forEach(x=>document.getElementById("tab-"+x).style.display=x===t?"block":"none");
+  renderAll();
+}
+function renderAll(){
+  renderCmd();
+  if(tab==="dash") renderDash();
+  else if(tab==="optimizer") renderOptimizer();
+  else if(tab==="routes") renderRoutes();
+}
+renderAll();
+setInterval(renderAll,30000);
+</script>
+</body>
+</html>
