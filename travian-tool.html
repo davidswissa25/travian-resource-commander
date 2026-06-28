@@ -729,9 +729,9 @@ function importJSON(e){
   }catch(err){ alert("Invalid JSON."); } };
   rd.readAsText(f); e.target.value="";
 }
-function mergeSync(incoming, silent){
+function mergeSync(incoming, silent, prune){
   const key=v=>(v.x||0)+"|"+(v.y||0); // match by coordinates so in-game renames update in place
-  let updated=0, added=0;
+  let updated=0, added=0, removed=0;
   incoming.forEach(nv=>{
     const ex=state.villages.find(v=>key(v)===key(nv));
     if(ex){
@@ -764,11 +764,22 @@ function mergeSync(incoming, silent){
       added++;
     }
   });
+  // On a full account pull, drop villages that were synced before but are gone now
+  // (lost/conquered/destroyed). Manually-added villages (synced:false) are kept.
+  if(prune){
+    const keep=new Set(incoming.map(key));
+    const gone=new Set(state.villages.filter(v=>v.synced && !keep.has(key(v))).map(v=>v.id));
+    if(gone.size){
+      state.villages=state.villages.filter(v=>!gone.has(v.id));
+      state.routes=state.routes.filter(r=>!gone.has(r.from) && !gone.has(r.to));
+      removed=gone.size;
+    }
+  }
   ensureIds(state.villages);
   dedupeAndSort(state); // collapse any rename-duplicates and re-order
   save(); renderAll();
-  if(!silent) alert("Sync complete - "+updated+" updated, "+added+" added.\nRoutes and manual troop data preserved.");
-  return {updated, added};
+  if(!silent) alert("Sync complete - "+updated+" updated, "+added+" added"+(removed?", "+removed+" removed":"")+".\nRoutes and manual troop data preserved.");
+  return {updated, added, removed};
 }
 // Locate a village by its game id (did) or, failing that, its coordinates - the
 // two stable keys the bridge can supply for a route's endpoints.
@@ -814,8 +825,8 @@ function applySyncedData(data){
   try{
     const d = (typeof data==="string") ? JSON.parse(data) : data;
     if(!d || !d.villages) return "no villages";
-    const r = mergeSync(d.villages, true);
-    let msg = "synced "+d.villages.length+" villages ("+r.updated+" updated, "+r.added+" added)";
+    const r = mergeSync(d.villages, true, true); // full account pull -> prune villages that vanished
+    let msg = "synced "+d.villages.length+" villages ("+r.updated+" updated, "+r.added+" added"+(r.removed?", "+r.removed+" removed":"")+")";
     if(Array.isArray(d.routes)){
       const rr = mergeSyncRoutes(d.routes);
       save(); renderAll();
