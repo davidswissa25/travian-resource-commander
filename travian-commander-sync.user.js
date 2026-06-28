@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Travian Commander - Pull & Sync bridge
 // @namespace    travian-commander
-// @version      1.3.1
+// @version      1.3.2
 // @description  One-click: a "Pull & Sync" button on the game retrieves every village's tribe, marketplace level, Trade Office level, production, net crop, current resource storages (warehouse/granary stock + capacity), computed merchant capacity and active recurring trade routes, then pushes it straight into the Resource Commander tool (open in another tab) - no console, no file import. Read-only on the game.
 // @author       you
 // @match        *://*.travian.com/*
@@ -137,10 +137,11 @@
       const list = [];
       JSON.parse(root.slice(s, j)).forEach(e => e.villages ? e.villages.forEach(v => list.push(v)) : list.push(e));
 
-      // account identity, so the tool can keep each account (yours + sitters) in its own profile
-      const player = clean((root.match(/class="playerName">([^<]+)</) || [])[1] || (root.match(/"ownPlayer":\{"name":"((?:[^"\\]|\\.)*)"/) || [])[1] || '');
+      // account identity, so the tool can keep each account (yours + sitters) in its own profile.
+      // playerId (filled from the trade-routes page below) is the reliable unique key; name is for display.
+      let player = clean((root.match(/class="playerName"[^>]*>\s*([^<]+?)\s*</) || [])[1] || (root.match(/"ownPlayer":\s*\{[^}]*?"name":"((?:[^"\\]|\\.)*)"/) || [])[1] || '');
       const serverName = clean((root.match(/<title>([^<]*)<\/title>/i) || [])[1] || '');
-      const account = { server: location.host, serverName, player };
+      let playerId = 0;
 
       const villages = [], routes = [];
       for (let n = 0; n < list.length; n++) {
@@ -174,8 +175,12 @@
           tradeShips: ships, shipCapacityReal: shipCap
         });
         // recurring "Trade routes" for this village (read-only); active sends only
-        extractTradeRoutes(await getText('/build.php?gid=17&t=3&newdid=' + v.id)).forEach(r => routes.push(r));
+        const rtHtml = await getText('/build.php?gid=17&t=3&newdid=' + v.id);
+        if (!playerId) { const m = rtHtml.match(/"ownPlayer":\s*\{\s*"id":\s*(\d+)/); if (m) playerId = +m[1]; }
+        if (!player) { const m = rtHtml.match(/class="playerName"[^>]*>\s*([^<]+?)\s*</); if (m) player = clean(m[1]); }
+        extractTradeRoutes(rtHtml).forEach(r => routes.push(r));
       }
+      const account = { server: location.host, serverName, player, playerId };
       if (list[0]) await getText('/dorf1.php?newdid=' + list[0].id); // restore active village
       villages.sort((a, b) => String(a.name).localeCompare(String(b.name), undefined, { numeric: true, sensitivity: 'base' }));
       return { villages, routes, account };
@@ -187,7 +192,7 @@
         if (btn) { btn.disabled = true; }
         const { villages, routes, account } = await pullAll((i, t) => { if (btn) btn.textContent = 'Pulling ' + i + '/' + t + '...'; });
         GM_setValue(KEY, { ts: Date.now(), source: 'travian-sync', villages, routes, account });
-        toast('✓ ' + (account.player || account.serverName || 'account') + ': pulled ' + villages.length + ' villages, ' + routes.length + ' active routes', '#3fb950');
+        toast('✓ ' + (account.player || (account.playerId ? 'player ' + account.playerId : account.serverName) || 'account') + ': pulled ' + villages.length + ' villages, ' + routes.length + ' active routes', '#3fb950');
         if (btn) btn.textContent = '✓ Synced ' + villages.length;
         setTimeout(() => { if (btn) { btn.textContent = label || '⤓ Pull & Sync'; btn.disabled = false; } }, 2500);
       } catch (e) {

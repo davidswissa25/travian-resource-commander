@@ -273,7 +273,13 @@ function loadDB(){
   return d;
 }
 function activeProfile(){ return db.profiles.find(p=>p.id===db.activeId) || db.profiles[0]; }
-function accountKeyOf(a){ return a && a.server ? (a.server+"|"+(a.player||"")).toLowerCase() : null; }
+// Prefer the numeric player id (unique + stable across renames); fall back to server+name.
+function accountKeyOf(a){
+  if(!a) return null;
+  if(a.playerId) return (a.server||"")+"|p"+a.playerId;
+  return a.server ? (a.server+"|"+(a.player||"")).toLowerCase() : null;
+}
+function accountLabel(a){ return (a&&a.player) || (a&&a.playerId?"Player "+a.playerId:"") || (a&&a.serverName) || "Account"; }
 // Find the profile for a synced/imported account, creating one if none matches
 // so a sitter's account lands in its own profile instead of merging into yours.
 function ensureProfileForAccount(a){
@@ -284,8 +290,8 @@ function ensureProfileForAccount(a){
     // claim the current profile only if it's an empty, unassigned one (fresh/migrated default);
     // otherwise always create a NEW profile so sitting another account never overwrites yours.
     if(cur && cur.accountKey==null && (!cur.villages || !cur.villages.length)){
-      cur.accountKey=k; cur.label=a.player||a.serverName||cur.label; p=cur;
-    } else { p=normalizeProfile({accountKey:k}, a.player||a.serverName||"Account"); db.profiles.push(p); }
+      cur.accountKey=k; cur.label=accountLabel(a); p=cur;
+    } else { p=normalizeProfile({accountKey:k}, accountLabel(a)); db.profiles.push(p); }
   }
   return p;
 }
