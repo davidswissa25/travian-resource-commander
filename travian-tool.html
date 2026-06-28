@@ -531,13 +531,48 @@ function applyPlan(){
   save(); setTab("routes");
 }
 
+/* ---- balance analysis: per-village deficit / overflow, factoring active routes ---- */
+// Uses the same projection the dashboard does (production - consumption + route in/out)
+// but reports every resource and classifies each as draining (will empty) or
+// overflowing (will hit capacity and waste). ETAs assume the current net rate holds.
+function balanceRow(v,flows){
+  const p=projected(v,flows), cells=RES.map(k=>{
+    const net=p.net[k], cur=p.cur[k], cap=p.cap[k]||0; let tag="stable", col="ok", eta=Infinity;
+    if(net<-0.5){ eta=cur/(-net); col=eta<6?"bad":"warn"; tag="empty in "+hms(eta); }
+    else if(net>0.5 && cap>0 && cur<cap){ eta=(cap-cur)/net; if(eta<24){ col="warn"; tag="full in "+hms(eta);} else tag="filling"; }
+    else if(net>0.5 && cap>0 && cur>=cap){ col="bad"; tag="overflowing"; }
+    return {k,net,col,tag,eta};
+  });
+  const worst=cells.reduce((a,b)=>(b.col==="bad"?2:b.col==="warn"?1:0)>(a.col==="bad"?2:a.col==="warn"?1:0)?b:a,cells[0]);
+  return {v,cells,worst};
+}
+function renderBalance(){
+  if(state.villages.length<1) return "";
+  const flows=routeFlows();
+  const rows=state.villages.map(v=>balanceRow(v,flows));
+  const deficits=rows.filter(r=>r.cells.some(c=>c.net<-0.5)).length;
+  const overflows=rows.filter(r=>r.cells.some(c=>c.tag.indexOf("full")===0||c.tag==="overflowing")).length;
+  const body=rows.sort((a,b)=>Math.min(...a.cells.map(c=>c.eta))-Math.min(...b.cells.map(c=>c.eta))).map(r=>{
+    const tds=r.cells.map(c=>`<td class="num" style="color:var(--${c.col})">${signed(c.net)}<div class="sub" style="font-size:11px;opacity:.85">${c.tag}</div></td>`).join("");
+    return `<tr><td>${esc(r.v.name)}</td>${tds}</tr>`;
+  }).join("");
+  return `<div style="margin-bottom:16px">
+    <div style="display:flex;gap:18px;align-items:baseline;margin-bottom:8px">
+      <b>Balance analysis</b>
+      <span class="note" style="margin:0">${deficits} village(s) draining &middot; ${overflows} nearing overflow &mdash; with active routes applied</span>
+    </div>
+    <table><thead><tr><th>Village</th><th class="num">Lumber /h</th><th class="num">Clay /h</th><th class="num">Iron /h</th><th class="num">Crop /h</th></tr></thead>
+    <tbody>${body}</tbody></table></div>`;
+}
+
 /* ---- routes tab ---- */
 function renderRoutes(){
   const el=document.getElementById("tab-routes");
   const head=`<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px"><p class="note" style="margin:0">Hourly flow = <code>resources &divide; interval</code>. Routes feed dashboard projections.</p><button class="primary" onclick="openRoute()" ${state.villages.length<2?'disabled':''}>+ Route</button></div>`;
-  if(!state.routes.length){ el.innerHTML=head+`<div class="empty"><h3>No routes</h3><p>Add one manually, or let <b>Auto Routes &#9889;</b> build a crop-balancing plan.</p></div>`; return; }
+  const analysis=renderBalance();
+  if(!state.routes.length){ el.innerHTML=head+analysis+`<div class="empty"><h3>No routes</h3><p>Add one manually, sync them from the game, or let <b>Auto Routes &#9889;</b> build a crop-balancing plan.</p></div>`; return; }
   const name=id=>{ const v=state.villages.find(v=>v.id===id); return v?v.name:"?"; };
-  el.innerHTML=head+`<table><thead><tr><th>From</th><th>To</th><th class="num">Lumber</th><th class="num">Clay</th><th class="num">Iron</th><th class="num">Crop</th><th class="num">Interval</th><th class="num">Crop/h</th><th class="num">Merchants</th><th></th></tr></thead><tbody>
+  el.innerHTML=head+analysis+`<table><thead><tr><th>From</th><th>To</th><th class="num">Lumber</th><th class="num">Clay</th><th class="num">Iron</th><th class="num">Crop</th><th class="num">Interval</th><th class="num">Crop/h</th><th class="num">Merchants</th><th></th></tr></thead><tbody>
   ${state.routes.map(r=>{ const cph=(r.resources&&r.resources.crop||0)/(r.intervalHours||1);
     return `<tr><td>${esc(name(r.from))}</td><td>${esc(name(r.to))}</td><td class="num">${fmt(r.resources&&r.resources.lumber||0)}</td><td class="num">${fmt(r.resources&&r.resources.clay||0)}</td><td class="num">${fmt(r.resources&&r.resources.iron||0)}</td><td class="num">${fmt(r.resources&&r.resources.crop||0)}</td><td class="num">${Math.round(r.intervalHours)}h${r.offsetHours?(" @"+hhmm(r.offsetHours)):""}</td><td class="num" style="color:var(--crop)">${signed(cph)}</td><td class="num">${r.merchants||"&mdash;"} ${r.auto?'<span class="pill ok">auto</span>':''}</td><td class="num">${(()=>{const sl=sendLink(state.villages.find(v=>v.id===r.from),state.villages.find(v=>v.id===r.to),(r.resources&&r.resources.crop)||0);return sl?'<a href="'+sl+'" target="_blank" style="color:var(--accent);margin-right:6px">Send</a>':'';})()}<button class="sm" onclick="openRoute('${r.id}')">&#9998;</button> <button class="sm danger" onclick="delRoute('${r.id}')">&#10005;</button></td></tr>`;
   }).join("")}</tbody></table>`;
@@ -714,6 +749,44 @@ function mergeSync(incoming, silent){
   if(!silent) alert("Sync complete - "+updated+" updated, "+added+" added.\nRoutes and manual troop data preserved.");
   return {updated, added};
 }
+// Locate a village by its game id (did) or, failing that, its coordinates - the
+// two stable keys the bridge can supply for a route's endpoints.
+function findVilByGeo(did,x,y){
+  return (did && state.villages.find(v=>v.did===did))
+      || state.villages.find(v=>(v.x||0)===(x||0)&&(v.y||0)===(y||0))
+      || null;
+}
+// Receive the recurring trade routes captured from the game marketplace and merge
+// them onto the village graph. Endpoints arrive as did/coords and are mapped to the
+// tool's internal ids. Routes flagged `synced` are owned by the bridge: each full
+// push replaces them, so routes deleted in-game disappear here too, while manually
+// added routes are left untouched. Multiple in-game sends to the same destination
+// collapse into one route (flows add up; smallest interval wins).
+function mergeSyncRoutes(incoming){
+  incoming = incoming || [];
+  const map={}, keep=new Set(); let skipped=0;
+  incoming.forEach(nr=>{
+    const from=findVilByGeo(nr.fromDid,nr.fromX,nr.fromY), to=findVilByGeo(nr.toDid,nr.toX,nr.toY);
+    if(!from||!to||from.id===to.id){ skipped++; return; }
+    const k=from.id+">"+to.id; keep.add(k);
+    const iv=Math.max(1,Math.min(24,Math.round(nr.intervalHours||24)));
+    const cur=map[k]||(map[k]={from:from.id,to:to.id,resources:{lumber:0,clay:0,iron:0,crop:0},intervalHours:iv,merchants:0});
+    RES.forEach(r=>cur.resources[r]+=(nr.resources&&nr.resources[r])||0);
+    cur.intervalHours=Math.min(cur.intervalHours,iv);
+    cur.merchants+=(nr.merchants||0);
+  });
+  let added=0, updated=0;
+  Object.keys(map).forEach(k=>{
+    const m=map[k], ex=state.routes.find(r=>r.synced&&(r.from+">"+r.to)===k);
+    if(ex){ ex.resources=m.resources; ex.intervalHours=m.intervalHours; ex.merchants=m.merchants||ex.merchants||1; ex.updatedAt=Date.now(); updated++; }
+    else { state.routes.push({id:uid(),from:m.from,to:m.to,resources:m.resources,intervalHours:m.intervalHours,merchants:m.merchants||1,synced:true,updatedAt:Date.now()}); added++; }
+  });
+  // prune synced routes that no longer exist in-game (manual routes are preserved)
+  const before=state.routes.length;
+  state.routes=state.routes.filter(r=>!r.synced || keep.has(r.from+">"+r.to));
+  const removed=before-state.routes.length;
+  return {added,updated,removed,skipped};
+}
 // Entry point the Tampermonkey bridge calls to push live game data in silently.
 // Accepts a JSON string or object; returns a short status string.
 function applySyncedData(data){
@@ -721,7 +794,13 @@ function applySyncedData(data){
     const d = (typeof data==="string") ? JSON.parse(data) : data;
     if(!d || !d.villages) return "no villages";
     const r = mergeSync(d.villages, true);
-    return "synced "+d.villages.length+" villages ("+r.updated+" updated, "+r.added+" added)";
+    let msg = "synced "+d.villages.length+" villages ("+r.updated+" updated, "+r.added+" added)";
+    if(Array.isArray(d.routes)){
+      const rr = mergeSyncRoutes(d.routes);
+      save(); renderAll();
+      msg += "; routes "+rr.added+" added, "+rr.updated+" updated"+(rr.removed?", "+rr.removed+" removed":"");
+    }
+    return msg;
   }catch(e){ console.warn("applySyncedData failed", e); return "error: "+e.message; }
 }
 window.applySyncedData = applySyncedData;

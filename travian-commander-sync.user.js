@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Travian Commander - Pull & Sync bridge
 // @namespace    travian-commander
-// @version      1.1
-// @description  One-click: a "Pull & Sync" button on the game retrieves every village's tribe, marketplace level, Trade Office level, production, net crop, current resource storages (warehouse/granary stock + capacity) and computed merchant capacity, then pushes it straight into the Resource Commander tool (open in another tab) - no console, no file import. Read-only on the game.
+// @version      1.2
+// @description  One-click: a "Pull & Sync" button on the game retrieves every village's tribe, marketplace level, Trade Office level, production, net crop, current resource storages (warehouse/granary stock + capacity), computed merchant capacity and active recurring trade routes, then pushes it straight into the Resource Commander tool (open in another tab) - no console, no file import. Read-only on the game.
 // @author       you
 // @match        *://*.travian.com/*
 // @match        file:///*travian-tool.html*
@@ -90,6 +90,44 @@
       });
     }
 
+    // Extract a balanced [...] array from `str` starting at/after `from`, skipping
+    // over JSON strings so a village name containing a bracket can't break it.
+    function sliceArray(str, from) {
+      const s = str.indexOf('[', from); if (s < 0) return null;
+      let d = 0, inStr = false, esc = false;
+      for (let j = s; j < str.length; j++) {
+        const c = str[j];
+        if (inStr) { if (esc) esc = false; else if (c === '\\') esc = true; else if (c === '"') inStr = false; continue; }
+        if (c === '"') inStr = true;
+        else if (c === '[') d++;
+        else if (c === ']') { d--; if (!d) return str.slice(s, j + 1); }
+      }
+      return null;
+    }
+    // The marketplace "Trade routes" tab (t=3) ships the full route graph as JSON inside
+    // Travian.React.TradeRoutes.render({viewData:{...tradeRoutes:[...]}}). Each destination
+    // holds a list of scheduled sends that tile a 24h cycle; we sum the ENABLED ones to a
+    // daily total and model it as one route at a 24h interval (hourly flow = daily / 24).
+    function extractTradeRoutes(html) {
+      const raw = sliceArray(html, html.indexOf('"tradeRoutes":'));
+      if (!raw) return [];
+      let arr; try { arr = JSON.parse(raw); } catch (e) { return []; }
+      const out = [];
+      arr.forEach(tr => {
+        if (!tr || !tr.from || !tr.to || !Array.isArray(tr.routes)) return;
+        const tot = { lumber: 0, clay: 0, iron: 0, crop: 0 }; let merch = 0, active = false;
+        tr.routes.forEach(r => {
+          if (!r || !r.enabled) return;                 // ACTIVE sends only
+          active = true; const cr = r.carriedResources || {};
+          tot.lumber += cr.lumber || 0; tot.clay += cr.clay || 0; tot.iron += cr.iron || 0; tot.crop += cr.crop || 0;
+          if ((r.merchants || 0) > merch) merch = r.merchants || 0;
+        });
+        if (!active || !(tot.lumber || tot.clay || tot.iron || tot.crop)) return;
+        out.push({ fromDid: tr.from.id, toDid: tr.to.id, toName: tr.to.name, resources: tot, intervalHours: 24, merchants: merch });
+      });
+      return out;
+    }
+
     async function pullAll(onProgress) {
       const root = await getText('/dorf1.php');
       const i = root.indexOf('"villageList":');
@@ -99,7 +137,7 @@
       const list = [];
       JSON.parse(root.slice(s, j)).forEach(e => e.villages ? e.villages.forEach(v => list.push(v)) : list.push(e));
 
-      const villages = [];
+      const villages = [], routes = [];
       for (let n = 0; n < list.length; n++) {
         const v = list[n];
         if (onProgress) onProgress(n + 1, list.length);
@@ -130,19 +168,21 @@
           marketplaceLevel: mkt, tradeOfficeLevel: to, merchantCapacityReal: cap,
           tradeShips: ships, shipCapacityReal: shipCap
         });
+        // recurring "Trade routes" for this village (read-only); active sends only
+        extractTradeRoutes(await getText('/build.php?gid=17&t=3&newdid=' + v.id)).forEach(r => routes.push(r));
       }
       if (list[0]) await getText('/dorf1.php?newdid=' + list[0].id); // restore active village
       villages.sort((a, b) => String(a.name).localeCompare(String(b.name), undefined, { numeric: true, sensitivity: 'base' }));
-      return villages;
+      return { villages, routes };
     }
 
     async function run(btn) {
       const label = btn ? btn.textContent : '';
       try {
         if (btn) { btn.disabled = true; }
-        const villages = await pullAll((i, t) => { if (btn) btn.textContent = 'Pulling ' + i + '/' + t + '...'; });
-        GM_setValue(KEY, { ts: Date.now(), source: 'travian-sync', villages });
-        toast('✓ Pulled ' + villages.length + ' villages - synced to Commander', '#3fb950');
+        const { villages, routes } = await pullAll((i, t) => { if (btn) btn.textContent = 'Pulling ' + i + '/' + t + '...'; });
+        GM_setValue(KEY, { ts: Date.now(), source: 'travian-sync', villages, routes });
+        toast('✓ Pulled ' + villages.length + ' villages, ' + routes.length + ' active routes - synced to Commander', '#3fb950');
         if (btn) btn.textContent = '✓ Synced ' + villages.length;
         setTimeout(() => { if (btn) { btn.textContent = label || '⤓ Pull & Sync'; btn.disabled = false; } }, 2500);
       } catch (e) {
