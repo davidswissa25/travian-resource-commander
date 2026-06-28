@@ -285,7 +285,13 @@ function routeFlows(){
 function netRates(v, flows){
   const inn=flows.inn[v.id]||{}, out=flows.out[v.id]||{}, n={};
   RES.forEach(k=>{ let base=(v.prod&&v.prod[k])||0; if(k==="crop") base-=consumption(v);
-    n[k]=base+(inn[k]||0)-(out[k]||0); });
+    // A trade route only sends what's available: outgoing shipments can't drive a resource
+    // negative (the game sends the max it can). So the floor = own production + incoming,
+    // and outgoing is effectively capped there. A village with non-negative own crop can
+    // never starve from sending; only its own deficit (floor<0) can. Receivers still get
+    // the route's nominal amount (over-provisioned sends are reconciled per village here).
+    const floor=base+(inn[k]||0);
+    n[k]=Math.max(floor-(out[k]||0), Math.min(floor,0)); });
   return n;
 }
 function projected(v, flows){
