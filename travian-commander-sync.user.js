@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Travian Commander - Pull & Sync bridge
 // @namespace    travian-commander
-// @version      1.2.1
+// @version      1.3
 // @description  One-click: a "Pull & Sync" button on the game retrieves every village's tribe, marketplace level, Trade Office level, production, net crop, current resource storages (warehouse/granary stock + capacity), computed merchant capacity and active recurring trade routes, then pushes it straight into the Resource Commander tool (open in another tab) - no console, no file import. Read-only on the game.
 // @author       you
 // @match        *://*.travian.com/*
@@ -137,6 +137,11 @@
       const list = [];
       JSON.parse(root.slice(s, j)).forEach(e => e.villages ? e.villages.forEach(v => list.push(v)) : list.push(e));
 
+      // account identity, so the tool can keep each account (yours + sitters) in its own profile
+      const player = clean((root.match(/class="playerName">([^<]+)</) || [])[1] || (root.match(/"ownPlayer":\{"name":"((?:[^"\\]|\\.)*)"/) || [])[1] || '');
+      const serverName = clean((root.match(/<title>([^<]*)<\/title>/i) || [])[1] || '');
+      const account = { server: location.host, serverName, player };
+
       const villages = [], routes = [];
       for (let n = 0; n < list.length; n++) {
         const v = list[n];
@@ -173,15 +178,15 @@
       }
       if (list[0]) await getText('/dorf1.php?newdid=' + list[0].id); // restore active village
       villages.sort((a, b) => String(a.name).localeCompare(String(b.name), undefined, { numeric: true, sensitivity: 'base' }));
-      return { villages, routes };
+      return { villages, routes, account };
     }
 
     async function run(btn) {
       const label = btn ? btn.textContent : '';
       try {
         if (btn) { btn.disabled = true; }
-        const { villages, routes } = await pullAll((i, t) => { if (btn) btn.textContent = 'Pulling ' + i + '/' + t + '...'; });
-        GM_setValue(KEY, { ts: Date.now(), source: 'travian-sync', villages, routes });
+        const { villages, routes, account } = await pullAll((i, t) => { if (btn) btn.textContent = 'Pulling ' + i + '/' + t + '...'; });
+        GM_setValue(KEY, { ts: Date.now(), source: 'travian-sync', villages, routes, account });
         toast('✓ Pulled ' + villages.length + ' villages, ' + routes.length + ' active routes - synced to Commander', '#3fb950');
         if (btn) btn.textContent = '✓ Synced ' + villages.length;
         setTimeout(() => { if (btn) { btn.textContent = label || '⤓ Pull & Sync'; btn.disabled = false; } }, 2500);
@@ -217,7 +222,7 @@
       if (!data || !data.villages || (data.ts || 0) <= lastTs) return;
       const fn = (unsafeWindow && unsafeWindow.applySyncedData) || window.applySyncedData;
       if (typeof fn !== 'function') return false;          // app not ready yet
-      const res = fn(JSON.stringify({ villages: data.villages, routes: data.routes || [] }));
+      const res = fn(JSON.stringify({ villages: data.villages, routes: data.routes || [], account: data.account || null }));
       lastTs = data.ts || Date.now();
       toast('✓ ' + res, '#3fb950');
       return true;

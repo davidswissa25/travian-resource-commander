@@ -15,6 +15,7 @@ No install, no build step, no server: open `travian-tool.html` in any browser. D
   - One-click **Send** deep-links into the in-game marketplace, pre-filled.
 - **Paste from game** — paste the Warehouse statistics page source (Ctrl+U) and it imports every village's stock, capacity, coordinates and crop balance at once. Merges (keeps your routes and manual edits).
 - **Balance analysis** (Trade Routes tab) — per village, each resource's net/h **with your active routes applied**, classified as draining ("empty in 3h"), nearing overflow ("full in 5h") or stable, sorted by soonest problem.
+- **Profiles** — keep a separate profile per account (your own plus any you sit). Pull & Sync auto-routes each account into its own profile (creating it on first sync); switch profiles from the header dropdown. Import creates a new profile when none matches; Export lets you pick which profile to save.
 - **JSON import/export** for backup and as the bridge to automation.
 
 ## Files

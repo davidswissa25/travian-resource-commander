@@ -89,6 +89,10 @@
 <body>
 <header>
   <h1>Travian <span>Resource Commander</span></h1>
+  <select id="profileSelect" class="sm" title="Active profile (account)" onchange="setActiveProfile(this.value)" style="margin-left:12px"></select>
+  <button class="ghost sm" onclick="newProfile()" title="New empty profile">+ Profile</button>
+  <button class="ghost sm" onclick="renameProfile()" title="Rename current profile">Rename</button>
+  <button class="ghost sm" onclick="deleteProfile()" title="Delete current profile">Delete</button>
   <div class="grow"></div>
   <button class="ghost sm" onclick="exportJSON()">Export</button>
   <button class="ghost sm" onclick="document.getElementById('importFile').click()">Import / Sync</button>
@@ -223,7 +227,8 @@ const SHIP = {capacity:500, speed:18};  // capacity is a per-village fallback (r
 const fmt = n => Math.round(n).toLocaleString();
 const signed = n => (n>=0?"+":"") + fmt(n);
 
-let state = load();
+let db = loadDB();
+let state = activeProfile();
 let tab = "dash";
 let editingV = null, editingR = null;
 let optTroopRows = [];
@@ -231,16 +236,63 @@ let optMargin = 50, optMode = "crop", optMinRoute = 200;
 let pasteResults = [];
 let balancePer = 1; // Balance-analysis display window in hours: 1 = per hour, 24 = per day
 
-function load(){
-  let s; try{ s = JSON.parse(localStorage.getItem("travianCommander")); }catch(e){}
-  if(!s||!s.villages) s={villages:[],routes:[]};
-  if(!s.routes) s.routes=[];
-  if(s.serverSpeed==null) s.serverSpeed=2;
-  if(s.allianceBonus==null) s.allianceBonus=0;
-  if(s.defaultMarket==null) s.defaultMarket=0;
-  ensureIds(s.villages); // backfill missing/duplicate ids so edit & delete always match
-  dedupeAndSort(s);      // remove rename-duplicates (same coords) and order by village number
-  return s;
+/* ---- profiles: each account (yours + the ones you sit) is its own profile ---- */
+function normalizeProfile(p, label){
+  p = p || {};
+  if(p.id==null) p.id=uid();
+  if(!p.label) p.label=label||"Account";
+  if(p.accountKey===undefined) p.accountKey=null;
+  if(!Array.isArray(p.villages)) p.villages=[];
+  if(!Array.isArray(p.routes)) p.routes=[];
+  if(p.serverSpeed==null) p.serverSpeed=2;
+  if(p.allianceBonus==null) p.allianceBonus=0;
+  if(p.defaultMarket==null) p.defaultMarket=0;
+  ensureIds(p.villages); // backfill missing/duplicate ids so edit & delete always match
+  dedupeAndSort(p);      // remove rename-duplicates (same coords) and order by village number
+  return p;
+}
+function loadDB(){
+  let d; try{ d=JSON.parse(localStorage.getItem("travianCommanderDB")); }catch(e){}
+  if(!d || !Array.isArray(d.profiles) || !d.profiles.length){
+    let old; try{ old=JSON.parse(localStorage.getItem("travianCommander")); }catch(e){} // migrate single-account data
+    const p = normalizeProfile(old && old.villages ? old : {}, "My account");
+    d = { activeId:p.id, profiles:[p] };
+  } else { d.profiles.forEach(p=>normalizeProfile(p)); }
+  if(!d.profiles.some(p=>p.id===d.activeId)) d.activeId=d.profiles[0].id;
+  return d;
+}
+function activeProfile(){ return db.profiles.find(p=>p.id===db.activeId) || db.profiles[0]; }
+function accountKeyOf(a){ return a && a.server ? (a.server+"|"+(a.player||"")).toLowerCase() : null; }
+// Find the profile for a synced/imported account, creating one if none matches
+// so a sitter's account lands in its own profile instead of merging into yours.
+function ensureProfileForAccount(a){
+  const k=accountKeyOf(a); if(!k) return null;
+  let p=db.profiles.find(x=>x.accountKey===k);
+  if(!p){
+    const cur=activeProfile();
+    if(cur && cur.accountKey==null){ // claim the current unassigned profile (e.g. the migrated default) instead of orphaning it
+      cur.accountKey=k; if(a.player && /^(My account|Account)$/i.test(cur.label)) cur.label=a.player; p=cur;
+    } else { p=normalizeProfile({accountKey:k}, a.player||a.serverName||"Account"); db.profiles.push(p); }
+  }
+  return p;
+}
+function setActiveProfile(id){ if(!db.profiles.some(p=>p.id===id)) return; db.activeId=id; state=activeProfile(); save(); renderAll(); }
+function newProfile(){
+  const label=(window.prompt("New profile name:","Account")||"").trim(); if(!label) return;
+  const p=normalizeProfile({}, label); db.profiles.push(p); db.activeId=p.id; state=activeProfile(); save(); renderAll();
+}
+function renameProfile(){
+  const label=(window.prompt("Rename profile:", state.label)||"").trim(); if(!label) return;
+  state.label=label; save(); renderAll();
+}
+function deleteProfile(){
+  if(db.profiles.length<=1){ alert("Can't delete the only profile."); return; }
+  if(!confirm('Delete profile "'+state.label+'" and all its villages and routes?')) return;
+  db.profiles=db.profiles.filter(p=>p.id!==db.activeId); db.activeId=db.profiles[0].id; state=activeProfile(); save(); renderAll();
+}
+function renderProfiles(){
+  const sel=document.getElementById("profileSelect"); if(!sel) return;
+  sel.innerHTML=db.profiles.map(p=>`<option value="${p.id}" ${p.id===db.activeId?'selected':''}>${esc(p.label)}</option>`).join("");
 }
 // A village's identity is its coordinates, not its name. Renaming in-game used to create
 // a second entry; collapse any villages sharing x|y (keep the most recently updated),
@@ -262,7 +314,7 @@ function dedupeAndSort(s){
   }
   s.villages.sort((a,b)=>String(a.name||'').localeCompare(String(b.name||''),undefined,{numeric:true,sensitivity:'base'}));
 }
-function save(){ localStorage.setItem("travianCommander", JSON.stringify(state)); }
+function save(){ localStorage.setItem("travianCommanderDB", JSON.stringify(db)); }
 function uid(){ return Date.now().toString(36)+Math.random().toString(36).slice(2,6); }
 // Every village must have a unique id; some imports/older data can miss it, which
 // breaks Edit and Delete (the button would call delVillage('undefined')).
@@ -701,8 +753,20 @@ function closeRoute(){ document.getElementById("rOverlay").classList.remove("sho
 
 /* ---- import / export / sync-merge ---- */
 function exportJSON(){
-  const blob=new Blob([JSON.stringify(state,null,2)],{type:"application/json"});
-  const a=document.createElement("a"); a.href=URL.createObjectURL(blob); a.download="travian-data.json"; a.click();
+  let p = state;
+  if(db.profiles.length>1){
+    const list=db.profiles.map((x,i)=>(i+1)+") "+x.label).join("\n");
+    const def=db.profiles.findIndex(x=>x.id===db.activeId)+1;
+    const ans=window.prompt("Export which profile?\n\n"+list+"\n\nEnter number:",String(def));
+    if(ans==null) return;
+    const idx=parseInt(ans,10)-1; if(isNaN(idx)||!db.profiles[idx]){ alert("Invalid selection."); return; }
+    p=db.profiles[idx];
+  }
+  const payload={ source:"travian-commander-profile", label:p.label, accountKey:p.accountKey,
+    villages:p.villages, routes:p.routes, serverSpeed:p.serverSpeed, allianceBonus:p.allianceBonus, defaultMarket:p.defaultMarket };
+  const blob=new Blob([JSON.stringify(payload,null,2)],{type:"application/json"});
+  const a=document.createElement("a"); a.href=URL.createObjectURL(blob);
+  a.download="travian-"+String(p.label||"profile").replace(/[^a-z0-9]+/gi,"-").toLowerCase()+".json"; a.click();
 }
 // Copy the retrieval script so it can be pasted into the game's console.
 function pullFromGame(){
@@ -723,9 +787,29 @@ function importJSON(e){
   const rd=new FileReader();
   rd.onload=()=>{ try{ const d=JSON.parse(rd.result);
     if(!d.villages){ alert("Unrecognized file."); return; }
+    const key = d.accountKey || accountKeyOf(d.account);   // identify the account this file belongs to
+    if(key){
+      let p=db.profiles.find(x=>x.accountKey===key); const fresh=!p;
+      if(fresh){ p=normalizeProfile({accountKey:key, label:d.label||(d.account&&d.account.player)||"Imported"}); db.profiles.push(p); }
+      db.activeId=p.id; state=activeProfile();
+      if(d.source==="travian-commander-profile"){       // full profile snapshot -> take it wholesale
+        state.villages=d.villages||[]; state.routes=d.routes||[];
+        if(d.serverSpeed!=null) state.serverSpeed=d.serverSpeed;
+        if(d.allianceBonus!=null) state.allianceBonus=d.allianceBonus;
+        if(d.defaultMarket!=null) state.defaultMarket=d.defaultMarket;
+        ensureIds(state.villages); dedupeAndSort(state); save();
+      } else {                                          // sync-style payload -> merge (and prune vanished)
+        mergeSync(d.villages, true, true);
+        if(Array.isArray(d.routes)) mergeSyncRoutes(d.routes); save();
+      }
+      renderAll();
+      alert((fresh?'Created profile "':'Updated profile "')+p.label+'" — '+d.villages.length+" villages imported.");
+      return;
+    }
+    // legacy file with no account info -> behave as before, into the active profile
     if(d.source==="travian-sync"){ mergeSync(d.villages); }
-    else if(confirm("Import "+d.villages.length+" villages.\n\nOK = MERGE into current data (keeps routes & manual troops).\nCancel = REPLACE everything.")){ mergeSync(d.villages); }
-    else { state=d; if(!state.routes) state.routes=[]; ensureIds(state.villages); save(); renderAll(); }
+    else if(confirm("Import "+d.villages.length+' villages into "'+state.label+'".\n\nOK = MERGE (keeps routes & manual troops).\nCancel = REPLACE this profile\'s villages/routes.')){ mergeSync(d.villages); }
+    else { state.villages=d.villages; state.routes=d.routes||[]; ensureIds(state.villages); dedupeAndSort(state); save(); renderAll(); }
   }catch(err){ alert("Invalid JSON."); } };
   rd.readAsText(f); e.target.value="";
 }
@@ -825,13 +909,15 @@ function applySyncedData(data){
   try{
     const d = (typeof data==="string") ? JSON.parse(data) : data;
     if(!d || !d.villages) return "no villages";
+    // route this pull into the profile for its account (creating + switching to it if new)
+    if(d.account){ const p=ensureProfileForAccount(d.account); if(p){ db.activeId=p.id; state=activeProfile(); } }
     const r = mergeSync(d.villages, true, true); // full account pull -> prune villages that vanished
-    let msg = "synced "+d.villages.length+" villages ("+r.updated+" updated, "+r.added+" added"+(r.removed?", "+r.removed+" removed":"")+")";
+    let msg = (d.account? "["+state.label+"] " : "")+"synced "+d.villages.length+" villages ("+r.updated+" updated, "+r.added+" added"+(r.removed?", "+r.removed+" removed":"")+")";
     if(Array.isArray(d.routes)){
       const rr = mergeSyncRoutes(d.routes);
-      save(); renderAll();
       msg += "; routes "+rr.added+" added, "+rr.updated+" updated"+(rr.removed?", "+rr.removed+" removed":"");
     }
+    save(); renderAll();
     return msg;
   }catch(e){ console.warn("applySyncedData failed", e); return "error: "+e.message; }
 }
@@ -898,6 +984,7 @@ function setTab(t){
   renderAll();
 }
 function renderAll(){
+  renderProfiles();
   renderCmd();
   if(tab==="dash") renderDash();
   else if(tab==="optimizer") renderOptimizer();
