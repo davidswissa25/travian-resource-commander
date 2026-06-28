@@ -93,6 +93,7 @@
   <button class="ghost sm" onclick="newProfile()" title="New empty profile">+ Profile</button>
   <button class="ghost sm" onclick="renameProfile()" title="Rename current profile">Rename</button>
   <button class="ghost sm" onclick="deleteProfile()" title="Delete current profile">Delete</button>
+  <button class="ghost sm" onclick="exportActiveProfile()" title="Export the selected profile to a file to share">Export this</button>
   <div class="grow"></div>
   <button class="ghost sm" onclick="exportJSON()">Export</button>
   <button class="ghost sm" onclick="document.getElementById('importFile').click()">Import / Sync</button>
@@ -752,6 +753,16 @@ function delRoute(id){ state.routes=state.routes.filter(r=>r.id!==id); save(); r
 function closeRoute(){ document.getElementById("rOverlay").classList.remove("show"); }
 
 /* ---- import / export / sync-merge ---- */
+function exportProfile(p){
+  const payload={ source:"travian-commander-profile", label:p.label, accountKey:p.accountKey,
+    villages:p.villages, routes:p.routes, serverSpeed:p.serverSpeed, allianceBonus:p.allianceBonus, defaultMarket:p.defaultMarket };
+  const blob=new Blob([JSON.stringify(payload,null,2)],{type:"application/json"});
+  const a=document.createElement("a"); a.href=URL.createObjectURL(blob);
+  a.download="travian-"+String(p.label||"profile").replace(/[^a-z0-9]+/gi,"-").toLowerCase()+".json"; a.click();
+}
+// One-click: export the profile currently selected in the header dropdown.
+function exportActiveProfile(){ exportProfile(state); }
+// Export with a chooser (defaults to the active profile) - handy to grab another profile.
 function exportJSON(){
   let p = state;
   if(db.profiles.length>1){
@@ -762,11 +773,7 @@ function exportJSON(){
     const idx=parseInt(ans,10)-1; if(isNaN(idx)||!db.profiles[idx]){ alert("Invalid selection."); return; }
     p=db.profiles[idx];
   }
-  const payload={ source:"travian-commander-profile", label:p.label, accountKey:p.accountKey,
-    villages:p.villages, routes:p.routes, serverSpeed:p.serverSpeed, allianceBonus:p.allianceBonus, defaultMarket:p.defaultMarket };
-  const blob=new Blob([JSON.stringify(payload,null,2)],{type:"application/json"});
-  const a=document.createElement("a"); a.href=URL.createObjectURL(blob);
-  a.download="travian-"+String(p.label||"profile").replace(/[^a-z0-9]+/gi,"-").toLowerCase()+".json"; a.click();
+  exportProfile(p);
 }
 // Copy the retrieval script so it can be pasted into the game's console.
 function pullFromGame(){
