@@ -543,11 +543,19 @@ function applyPlan(){
 // but reports every resource and classifies each as draining (will empty) or
 // overflowing (will hit capacity and waste). ETAs assume the current net rate holds.
 function balanceRow(v,flows){
+  const inn=flows.inn[v.id]||{}, out=flows.out[v.id]||{};
   const p=projected(v,flows), cells=RES.map(k=>{
-    const net=p.net[k], cur=p.cur[k], cap=p.cap[k]||0; let tag="stable", col="ok", eta=Infinity;
+    let base=(v.prod&&v.prod[k])||0; if(k==="crop") base-=consumption(v);
+    const rawNet=base+(inn[k]||0)-(out[k]||0); // net BEFORE the outgoing cap - tells if sending is what flattens it
+    const net=p.net[k], cur=p.cur[k], cap=p.cap[k]||0; let tag, col="ok", eta=Infinity;
     if(net<-0.5){ eta=cur/(-net); col=eta<6?"bad":"warn"; tag="empty in "+hms(eta); }
-    else if(net>0.5 && cap>0 && cur<cap){ eta=(cap-cur)/net; if(eta<24){ col="warn"; tag="full in "+hms(eta);} else tag="filling"; }
-    else if(net>0.5 && cap>0 && cur>=cap){ col="bad"; tag="overflowing"; }
+    else if(net>0.5){
+      if(cap>0 && cur>=cap){ col="bad"; tag="overflowing"; }
+      else if(cap>0){ eta=(cap-cur)/net; if(eta<24){ col="warn"; tag="full in "+hms(eta);} else tag="filling"; }
+      else tag="filling";
+    }
+    // net ~ 0: distinguish a natural balance from sending being capped at what's available
+    else tag = rawNet < -0.5 ? "sending surplus" : "balanced";
     return {k,net,col,tag,eta};
   });
   const worst=cells.reduce((a,b)=>(b.col==="bad"?2:b.col==="warn"?1:0)>(a.col==="bad"?2:a.col==="warn"?1:0)?b:a,cells[0]);
