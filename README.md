@@ -19,14 +19,15 @@ No install, no build step, no server: open `travian-tool.html` in any browser. D
 ## Files
 
 - `travian-tool.html` — the application. Double-click to open.
-- `travian-sync.user.js` — optional read-only Tampermonkey userscript that captures village data from your logged-in session (alternative to Paste from game).
+- `travian-commander-sync.user.js` — optional read-only Tampermonkey userscript. Adds a one-click **⤓ Pull & Sync** button on the game that pushes every village's data straight into `travian-tool.html` (open in another tab) — no console, no file import.
 
 ## Usage
 
 1. Open `travian-tool.html`.
-2. In game, open **Statistics → Resources → Warehouse**, press **Ctrl+U**, select all, copy.
-3. In the tool: **Paste from game** → paste → **Parse & preview** → **Import**.
-4. Set each village's Trade Office and Marketplace level (and the alliance bonus / server URL) for exact merchant math, then use the **Auto Routes** tab.
+2. Get your village data in, either way:
+   - **Paste from game:** in game open **Statistics → Resources → Warehouse**, press **Ctrl+U**, select all, copy, then in the tool **Paste from game** → paste → **Parse & preview** → **Import**.
+   - **Pull & Sync (userscript):** install `travian-commander-sync.user.js` in Tampermonkey, enable **Allow access to file URLs** for the extension, open both your game world and `travian-tool.html`, then click the floating **⤓ Pull & Sync** button on the game — the tool updates instantly.
+3. Set each village's Trade Office and Marketplace level (and the alliance bonus / server URL) for exact merchant math, then use the **Auto Routes** tab.
 
 ## Notes / disclaimer
 

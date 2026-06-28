@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Travian Commander - Pull & Sync bridge
 // @namespace    travian-commander
-// @version      1.0
-// @description  One-click: a "Pull & Sync" button on the game retrieves every village's tribe, marketplace level, Trade Office level, production, net crop and computed merchant capacity, then pushes it straight into the Resource Commander tool (open in another tab) - no console, no file import. Read-only on the game.
+// @version      1.1
+// @description  One-click: a "Pull & Sync" button on the game retrieves every village's tribe, marketplace level, Trade Office level, production, net crop, current resource storages (warehouse/granary stock + capacity) and computed merchant capacity, then pushes it straight into the Resource Commander tool (open in another tab) - no console, no file import. Read-only on the game.
 // @author       you
 // @match        *://*.travian.com/*
 // @match        file:///*travian-tool.html*
@@ -105,6 +105,12 @@
         if (onProgress) onProgress(n + 1, list.length);
         const d1 = await getText('/dorf1.php?newdid=' + v.id);
         const pm = d1.match(/production:\s*(\{[^}]*\})/); const p = pm ? JSON.parse(pm[1]) : {};
+        // current stock + capacity live in the same `resources` object as production
+        // (lowercase `storage:` won't match `maxStorage:` thanks to its capital S)
+        const stm = d1.match(/storage:\s*(\{[^}]*\})/);    const st = stm ? JSON.parse(stm[1]) : {};
+        const mxm = d1.match(/maxStorage:\s*(\{[^}]*\})/); const mx = mxm ? JSON.parse(mxm[1]) : {};
+        const stock = k => Math.max(0, Math.round(+st['l' + k] || 0)); // l1 lumber, l2 clay, l3 iron, l4 crop
+        const capOf = k => Math.max(0, Math.round(+mx['l' + k] || 0)); // l1-l3 warehouse, l4 granary
         const mkt = lvl(await getText('/build.php?gid=17&newdid=' + v.id));
         const to = lvl(await getText('/build.php?gid=28&newdid=' + v.id), 'Trade Office');
         const d2 = await getText('/dorf2.php?newdid=' + v.id);
@@ -119,6 +125,8 @@
           name: v.name, did: v.id, x: v.x, y: v.y, tribe: T.name, synced: true,
           prod: { lumber: p.l1 || 0, clay: p.l2 || 0, iron: p.l3 || 0, crop: l5 },
           baseConsumption: Math.max(0, l5 - l4),
+          warehouse: { capacity: capOf(1), lumber: stock(1), clay: stock(2), iron: stock(3) },
+          granary: { capacity: capOf(4), crop: stock(4) },
           marketplaceLevel: mkt, tradeOfficeLevel: to, merchantCapacityReal: cap,
           tradeShips: ships, shipCapacityReal: shipCap
         });
