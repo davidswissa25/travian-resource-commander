@@ -229,6 +229,7 @@ let editingV = null, editingR = null;
 let optTroopRows = [];
 let optMargin = 50, optMode = "crop", optMinRoute = 200;
 let pasteResults = [];
+let balancePer = 1; // Balance-analysis display window in hours: 1 = per hour, 24 = per day
 
 function load(){
   let s; try{ s = JSON.parse(localStorage.getItem("travianCommander")); }catch(e){}
@@ -552,18 +553,22 @@ function renderBalance(){
   const rows=state.villages.map(v=>balanceRow(v,flows));
   const deficits=rows.filter(r=>r.cells.some(c=>c.net<-0.5)).length;
   const overflows=rows.filter(r=>r.cells.some(c=>c.tag.indexOf("full")===0||c.tag==="overflowing")).length;
+  const per=balancePer===24?24:1, unit=per===24?"/24h":"/h"; // ETAs are unaffected; only the rate label scales
   const body=rows.sort((a,b)=>Math.min(...a.cells.map(c=>c.eta))-Math.min(...b.cells.map(c=>c.eta))).map(r=>{
-    const tds=r.cells.map(c=>`<td class="num" style="color:var(--${c.col})">${signed(c.net)}<div class="sub" style="font-size:11px;opacity:.85">${c.tag}</div></td>`).join("");
+    const tds=r.cells.map(c=>`<td class="num" style="color:var(--${c.col})">${signed(c.net*per)}<div class="sub" style="font-size:11px;opacity:.85">${c.tag}</div></td>`).join("");
     return `<tr><td>${esc(r.v.name)}</td>${tds}</tr>`;
   }).join("");
+  const btn=(p,lbl)=>`<button class="sm${per===p?' primary':''}" onclick="setBalancePer(${p})">${lbl}</button>`;
   return `<div style="margin-bottom:16px">
     <div style="display:flex;gap:18px;align-items:baseline;margin-bottom:8px">
       <b>Balance analysis</b>
       <span class="note" style="margin:0">${deficits} village(s) draining &middot; ${overflows} nearing overflow &mdash; with active routes applied</span>
+      <span style="margin-left:auto;display:inline-flex;gap:4px;align-items:center"><span class="note" style="margin:0">Show rate:</span>${btn(1,"per 1h")}${btn(24,"per 24h")}</span>
     </div>
-    <table><thead><tr><th>Village</th><th class="num">Lumber /h</th><th class="num">Clay /h</th><th class="num">Iron /h</th><th class="num">Crop /h</th></tr></thead>
+    <table><thead><tr><th>Village</th><th class="num">Lumber ${unit}</th><th class="num">Clay ${unit}</th><th class="num">Iron ${unit}</th><th class="num">Crop ${unit}</th></tr></thead>
     <tbody>${body}</tbody></table></div>`;
 }
+function setBalancePer(p){ balancePer = (p===24?24:1); renderRoutes(); }
 
 /* ---- routes tab ---- */
 function renderRoutes(){
