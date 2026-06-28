@@ -281,8 +281,10 @@ function ensureProfileForAccount(a){
   let p=db.profiles.find(x=>x.accountKey===k);
   if(!p){
     const cur=activeProfile();
-    if(cur && cur.accountKey==null){ // claim the current unassigned profile (e.g. the migrated default) instead of orphaning it
-      cur.accountKey=k; if(a.player && /^(My account|Account)$/i.test(cur.label)) cur.label=a.player; p=cur;
+    // claim the current profile only if it's an empty, unassigned one (fresh/migrated default);
+    // otherwise always create a NEW profile so sitting another account never overwrites yours.
+    if(cur && cur.accountKey==null && (!cur.villages || !cur.villages.length)){
+      cur.accountKey=k; cur.label=a.player||a.serverName||cur.label; p=cur;
     } else { p=normalizeProfile({accountKey:k}, a.player||a.serverName||"Account"); db.profiles.push(p); }
   }
   return p;

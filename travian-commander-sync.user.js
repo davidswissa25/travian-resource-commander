@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Travian Commander - Pull & Sync bridge
 // @namespace    travian-commander
-// @version      1.3
+// @version      1.3.1
 // @description  One-click: a "Pull & Sync" button on the game retrieves every village's tribe, marketplace level, Trade Office level, production, net crop, current resource storages (warehouse/granary stock + capacity), computed merchant capacity and active recurring trade routes, then pushes it straight into the Resource Commander tool (open in another tab) - no console, no file import. Read-only on the game.
 // @author       you
 // @match        *://*.travian.com/*
@@ -187,7 +187,7 @@
         if (btn) { btn.disabled = true; }
         const { villages, routes, account } = await pullAll((i, t) => { if (btn) btn.textContent = 'Pulling ' + i + '/' + t + '...'; });
         GM_setValue(KEY, { ts: Date.now(), source: 'travian-sync', villages, routes, account });
-        toast('✓ Pulled ' + villages.length + ' villages, ' + routes.length + ' active routes - synced to Commander', '#3fb950');
+        toast('✓ ' + (account.player || account.serverName || 'account') + ': pulled ' + villages.length + ' villages, ' + routes.length + ' active routes', '#3fb950');
         if (btn) btn.textContent = '✓ Synced ' + villages.length;
         setTimeout(() => { if (btn) { btn.textContent = label || '⤓ Pull & Sync'; btn.disabled = false; } }, 2500);
       } catch (e) {
