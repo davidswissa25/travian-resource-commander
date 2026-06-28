@@ -365,8 +365,9 @@ function renderCmd(){
   const flows=routeFlows();
   let totalCrop=0,draining=0,soonest=Infinity,soonestName="";
   state.villages.forEach(v=>{ const p=projected(v,flows); totalCrop+=p.net.crop;
-    const incoming=(flows.inn[v.id]&&flows.inn[v.id].crop)||0;
-    if(p.net.crop<0){ draining++; if(incoming<=0){ const t=p.cur.crop/(-p.net.crop); if(t<soonest){soonest=t;soonestName=v.name;} } } });
+    // net.crop already accounts for route in/out (and the outgoing cap), so any net-negative
+    // village will empty its granary - no separate "incoming" guard (that double-counted routes).
+    if(p.net.crop<0){ draining++; const t=p.cur.crop/(-p.net.crop); if(t<soonest){soonest=t;soonestName=v.name;} } });
   const soonStr = soonest===Infinity ? "&mdash;" : hms(soonest);
   document.getElementById("cmdbar").innerHTML = `
     <div class="stat"><div class="lbl">Villages</div><div class="val">${state.villages.length}</div><div class="sub">${state.routes.length} active routes</div></div>
