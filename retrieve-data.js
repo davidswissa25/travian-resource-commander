@@ -1,8 +1,9 @@
 /* ============================================================================
    Travian Resource Commander - data retriever  (read-only, no game actions)
    ----------------------------------------------------------------------------
-   Pulls every village's: tribe, marketplace level, Trade Office level, resource
-   production, net crop, and computes real per-merchant capacity. Downloads
+   Pulls every village's: tribe, marketplace level, Trade Office level, barracks &
+   stable levels, resource production, net crop, and computes real per-merchant
+   capacity. Downloads
    "travian-carrier-data.json" to Import / Sync into the tool.
 
    RUN: log into your game world -> F12 Console -> paste this whole file -> Enter.
@@ -69,6 +70,8 @@
     const pm = d1.match(/production:\s*(\{[^}]*\})/); const p = pm ? JSON.parse(pm[1]) : {};
     const mkt = lvl(await getText('/build.php?gid=17&newdid=' + v.id));
     const to  = lvl(await getText('/build.php?gid=28&newdid=' + v.id), 'Trade Office');
+    const bar = lvl(await getText('/build.php?gid=19&newdid=' + v.id)); // gid 19 = Barracks
+    const sta = lvl(await getText('/build.php?gid=20&newdid=' + v.id)); // gid 20 = Stable
     const d2 = await getText('/dorf2.php?newdid=' + v.id);
     const wm = d2.match(/class="wall\s+([a-z]+)/i); const T = TRIBE[wm ? wm[1].toLowerCase() : 'roman'] || TRIBE.roman;
     const cap = Math.round(T.base * SERVER * (1 + T.toRate * to / 100) * (1 + ALLIANCE_BONUS / 100));
@@ -83,9 +86,10 @@
       prod: { lumber: p.l1 || 0, clay: p.l2 || 0, iron: p.l3 || 0, crop: l5 },
       baseConsumption: Math.max(0, l5 - l4),         // so net crop = l4
       marketplaceLevel: mkt, tradeOfficeLevel: to, merchantCapacityReal: cap,
-      tradeShips: ships, shipCapacityReal: shipCap
+      tradeShips: ships, shipCapacityReal: shipCap,
+      barracksLevel: bar, stableLevel: sta
     });
-    log(`${v.name}: ${T.name} mkt${mkt} TO${to} cap${cap} ships${ships}${shipCap?('@'+shipCap):''} net${l4}`);
+    log(`${v.name}: ${T.name} mkt${mkt} TO${to} bar${bar} sta${sta} cap${cap} ships${ships}${shipCap?('@'+shipCap):''} net${l4}`);
   }
   if (list[0]) await getText('/dorf1.php?newdid=' + list[0].id);   // restore active village
 

@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Travian Commander - Pull & Sync bridge
 // @namespace    travian-commander
-// @version      1.3.2
-// @description  One-click: a "Pull & Sync" button on the game retrieves every village's tribe, marketplace level, Trade Office level, production, net crop, current resource storages (warehouse/granary stock + capacity), computed merchant capacity and active recurring trade routes, then pushes it straight into the Resource Commander tool (open in another tab) - no console, no file import. Read-only on the game.
+// @version      1.4.0
+// @description  One-click: a "Pull & Sync" button on the game retrieves every village's tribe, marketplace level, Trade Office level, barracks & stable levels, production, net crop, current resource storages (warehouse/granary stock + capacity), computed merchant capacity and active recurring trade routes, then pushes it straight into the Resource Commander tool (open in another tab) - no console, no file import. Read-only on the game.
 // @author       you
 // @match        *://*.travian.com/*
 // @match        file:///*travian-tool.html*
@@ -157,6 +157,8 @@
         const capOf = k => Math.max(0, Math.round(+mx['l' + k] || 0)); // l1-l3 warehouse, l4 granary
         const mkt = lvl(await getText('/build.php?gid=17&newdid=' + v.id));
         const to = lvl(await getText('/build.php?gid=28&newdid=' + v.id), 'Trade Office');
+        const bar = lvl(await getText('/build.php?gid=19&newdid=' + v.id)); // gid 19 = Barracks
+        const sta = lvl(await getText('/build.php?gid=20&newdid=' + v.id)); // gid 20 = Stable
         const d2 = await getText('/dorf2.php?newdid=' + v.id);
         const wm = d2.match(/class="wall\s+([a-z]+)/i); const T = TRIBE[wm ? wm[1].toLowerCase() : 'roman'] || TRIBE.roman;
         const cap = Math.round(T.base * SERVER * (1 + T.toRate * to / 100) * (1 + ALLIANCE_BONUS / 100));
@@ -172,7 +174,8 @@
           warehouse: { capacity: capOf(1), lumber: stock(1), clay: stock(2), iron: stock(3) },
           granary: { capacity: capOf(4), crop: stock(4) },
           marketplaceLevel: mkt, tradeOfficeLevel: to, merchantCapacityReal: cap,
-          tradeShips: ships, shipCapacityReal: shipCap
+          tradeShips: ships, shipCapacityReal: shipCap,
+          barracksLevel: bar, stableLevel: sta
         });
         // recurring "Trade routes" for this village (read-only); active sends only
         const rtHtml = await getText('/build.php?gid=17&t=3&newdid=' + v.id);
