@@ -27,6 +27,7 @@
     hun:      { name: 'Huns',      base: 500,  toRate: 20 },
     spartan:  { name: 'Spartans',  base: 500,  toRate: 20 }
   };
+  const TID = { 1: 'roman', 2: 'teuton', 3: 'gaul', 6: 'egyptian', 7: 'hun', 8: 'spartan' }; // Travian tribeId -> wall class
   // ==========================================================================
   const STRIP = /[‪-‮⁦-⁩]/g;
   const clean = s => String(s == null ? '' : s).replace(STRIP, '').replace(/\s+/g, ' ').trim();
@@ -73,7 +74,9 @@
     const bar = lvl(await getText('/build.php?gid=19&newdid=' + v.id)); // gid 19 = Barracks
     const sta = lvl(await getText('/build.php?gid=20&newdid=' + v.id)); // gid 20 = Stable
     const d2 = await getText('/dorf2.php?newdid=' + v.id);
-    const wm = d2.match(/class="wall\s+([a-z]+)/i); const T = TRIBE[wm ? wm[1].toLowerCase() : 'roman'] || TRIBE.roman;
+    const tid = +(d1.match(/"village":\s*\{[^}]*?"tribeId":\s*(\d+)/) || [])[1] || 0; // reliable even without a wall
+    const wm = d2.match(/class="wall\s+([a-z]+)/i);
+    const T = TRIBE[TID[tid] || (wm ? wm[1].toLowerCase() : 'roman')] || TRIBE.roman;
     const cap = Math.round(T.base * SERVER * (1 + T.toRate * to / 100) * (1 + ALLIANCE_BONUS / 100));
     // harbor (gid 49): "Trade ship (In service N)" -> N. Absent / no harbor -> 0.
     const harbor = clean(await getText('/build.php?gid=49&newdid=' + v.id));
