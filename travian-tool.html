@@ -619,15 +619,17 @@ function optimize(){
   const flows=routeFlows();
   const data=state.villages.map(v=>{ const p=projected(v,flows); return {v,net:p.net.crop,crop:p.cur.crop,capRoom:p.cap.crop-p.cur.crop}; });
   const committed=committedCarriers();
-  let donors=data.filter(d=>d.net-optMargin>0).map(d=>{
-    const c=committed[d.v.id]||{merchants:0,ships:0};
-    return {...d, avail:d.net-optMargin,
-      merchAvail:Math.max(0,maxMerchants(d.v)-c.merchants),
-      shipAvail:Math.max(0,maxShips(d.v)-c.ships)};
-  });
+  // Shared per-village carrier pool (merchants + trade ships free after existing routes). A village
+  // can be both a crop donor AND a relay hub for another village's crop, so every leg - direct or
+  // forwarded - draws from this one pool, which prevents booking the same carrier twice.
+  const carr={}; state.villages.forEach(v=>{ const c=committed[v.id]||{merchants:0,ships:0};
+    carr[v.id]={merch:Math.max(0,maxMerchants(v)-c.merchants), ship:Math.max(0,maxShips(v)-c.ships)}; });
+  const wrap=id=>({v:state.villages.find(x=>x.id===id), merchAvail:carr[id].merch, shipAvail:carr[id].ship});
+  let donors=data.filter(d=>d.net-optMargin>0).map(d=>({v:d.v, avail:d.net-optMargin}));
   let receivers=data.filter(d=>d.net<0).map(d=>({...d,need:-d.net,eta:d.crop/(-d.net)})).sort((a,b)=>a.eta-b.eta);
+  const hubs=data.filter(d=>d.net>=0).map(d=>({v:d.v})); // any non-draining village may forward crop on (1 hop)
   const balanced=receivers.length===0, routes=[], unmet=[];
-  const hadDonors=donors.length>0, freeCarriers=donors.reduce((s,d)=>s+d.merchAvail+d.shipAvail,0);
+  const hadDonors=donors.length>0, freeCarriers=donors.reduce((s,d)=>s+carr[d.v.id].merch+carr[d.v.id].ship,0);
   // Batch model: send "perSend" crop every "interval" h. Interval is as long as possible
   // (=round trip, so carriers recycle) but short enough to arrive before the granary empties.
   // If the village drains faster than carriers return, waves overlap => more carriers needed.
@@ -640,8 +642,6 @@ function optimize(){
     if(F>0 && freeSpace>0) I=Math.min(I, Math.floor(freeSpace/F));
     return Math.max(1, Math.min(24, I||1));
   }
-  // What this donor can actually deliver to rec (probe; allocate does not mutate state).
-  function maxFlow(d,rec){ return allocate(d, dist(d.v,rec.v), rec, Math.min(rec.need, d.avail)).F; }
   // Fill a flow target from a donor's fleets (richest carrier first), respecting whole-hour
   // intervals and per-fleet availability. Returns delivered crop/h plus carriers tied up.
   function allocate(d,dst,rec,target){
@@ -661,35 +661,77 @@ function optimize(){
     }
     return {F, I, mUsed, sUsed, capped, roundTrip:Tfast};
   }
-  receivers.forEach(rec=>{
-    let need=rec.need;
-    const capable=donors.filter(d=>maxFlow(d,rec)>=need-1).map(d=>({d,dst:dist(d.v,rec.v)})).sort((a,b)=>a.dst-b.dst);
-    const pool = capable.length ? [capable[0]]
-               : donors.filter(d=>maxFlow(d,rec)>=optMinRoute).map(d=>({d,dst:dist(d.v,rec.v)})).sort((a,b)=>a.dst-b.dst);
-    for(const {d,dst} of pool){
-      if(need<=1) break;
-      const a=allocate(d, dst, rec, Math.min(need, d.avail));
-      const F=a.F;
-      if(F<1) continue; // no carriers free for even one wave
-      if(F<optMinRoute && F<need-1) continue; // route penalty: avoid tiny splits
-      const perSend=Math.round(F*a.I);
-      routes.push({from:d.v.id,to:rec.v.id,fromName:d.v.name,toName:rec.v.name,
-        cropPerHour:F, perSend, interval:a.I, distance:Math.round(dst),
-        merchants:a.mUsed, ships:a.sUsed, roundTrip:a.roundTrip, merchCapped:a.capped,
-        impact:(need-F<=1)?"deficit fully covered":"&minus;"+fmt(F)+"/h drain"});
-      d.avail-=F; d.merchAvail-=a.mUsed; d.shipAvail-=a.sUsed; need-=F;
+  // ---- candidate supply paths: direct donor->receiver, or relayed donor->hub->receiver (1 hop) ----
+  // Relaying lets a far donor hand crop to a nearby hub that finishes the trip with ITS own spare
+  // carriers (e.g. a coastal village's idle trade ships) - covering deficits a direct route can't,
+  // and sparing the donor's fleet for other villages.
+  function directCand(D,R,need){
+    const dst=dist(D.v,R.v), a=allocate(wrap(D.v.id),dst,R,Math.min(need,D.avail));
+    if(a.F<1) return null;
+    return {F:a.F,dCarr:a.mUsed+a.sUsed,totCarr:a.mUsed+a.sUsed,maxDist:dst,kind:"direct",srcId:D.v.id,
+      legs:[{fromId:D.v.id,toV:R.v,a,dst}]};
+  }
+  function relayCand(D,H,R,need){
+    const sink={v:H.v,crop:1e12,need:1e-6,capRoom:1e12}; // hub forwards crop on, so its granary doesn't bound the interval
+    const d1=dist(D.v,H.v), p=allocate(wrap(D.v.id),d1,sink,Math.min(need,D.avail));
+    if(p.F<optMinRoute) return null;                              // first leg can't move a worthwhile amount
+    const d2=dist(H.v,R.v), a2=allocate(wrap(H.v.id),d2,R,Math.min(p.F,need));
+    if(a2.F<1) return null;                                       // hub has no spare carriers for the onward leg
+    const a1=allocate(wrap(D.v.id),d1,sink,a2.F), F=Math.min(a1.F,a2.F); // size leg 1 to the binding flow
+    if(F<1) return null;
+    return {F,dCarr:a1.mUsed+a1.sUsed,totCarr:a1.mUsed+a1.sUsed+a2.mUsed+a2.sUsed,maxDist:Math.max(d1,d2),
+      kind:"relay",srcId:D.v.id,hubId:H.v.id,
+      legs:[{fromId:D.v.id,toV:H.v,a:a1,dst:d1,relay:"in"},{fromId:H.v.id,toV:R.v,a:a2,dst:d2,relay:"out"}]};
+  }
+  function better(c,b){ // most crop delivered, then spare the donor's own fleet, then fewer carriers/legs, then nearer
+    if(Math.abs(c.F-b.F)>0.5) return c.F>b.F;
+    if(c.dCarr!==b.dCarr) return c.dCarr<b.dCarr;
+    if(c.totCarr!==b.totCarr) return c.totCarr<b.totCarr;
+    if((c.kind==="direct")!==(b.kind==="direct")) return c.kind==="direct";
+    return c.maxDist<b.maxDist;
+  }
+  function commitCand(c,covered){
+    c.legs.forEach(leg=>{
+      const fromV=state.villages.find(x=>x.id===leg.fromId), a=leg.a, perSend=Math.round(c.F*a.I);
+      carr[leg.fromId].merch=Math.max(0,carr[leg.fromId].merch-a.mUsed);
+      carr[leg.fromId].ship =Math.max(0,carr[leg.fromId].ship -a.sUsed);
+      const impact = c.kind==="relay"
+        ? (leg.relay==="in" ? "relay &rarr; "+esc(leg.toV.name)+" (hub)" : "hub &rarr; "+esc(leg.toV.name)+(covered?" &middot; covered":""))
+        : (covered?"deficit fully covered":"&minus;"+fmt(c.F)+"/h drain");
+      routes.push({from:leg.fromId,to:leg.toV.id,fromName:fromV.name,toName:leg.toV.name,
+        cropPerHour:c.F,perSend,interval:a.I,distance:Math.round(leg.dst),
+        merchants:a.mUsed,ships:a.sUsed,roundTrip:a.roundTrip,merchCapped:a.capped,
+        relay:c.kind==="relay"?leg.relay:null,impact});
+    });
+  }
+  receivers.forEach(R=>{
+    let need=R.need;
+    while(need>1){
+      let best=null;
+      const consider=c=>{ if(c && (c.F>=optMinRoute || c.F>=need-1) && (!best||better(c,best))) best=c; };
+      donors.forEach(D=>{ if(D.avail<=0.5) return;
+        consider(directCand(D,R,need));
+        hubs.forEach(H=>{ if(H.v.id!==D.v.id && H.v.id!==R.v.id && carr[H.v.id].merch+carr[H.v.id].ship>0) consider(relayCand(D,H,R,need)); });
+      });
+      if(!best || best.F<1) break;                 // nothing can make progress
+      const covered=(need-best.F)<=1;
+      commitCand(best,covered);
+      const D=donors.find(d=>d.v.id===best.srcId); if(D) D.avail-=best.F;
+      need-=best.F;
     }
-    if(need>1) unmet.push({name:rec.v.name,need});
+    if(need>1) unmet.push({name:R.v.name,need});
   });
   // Stagger send offsets per source so carriers aren't all out at once.
   const bySrc={}; routes.forEach(r=>{ (bySrc[r.from]=bySrc[r.from]||[]).push(r); });
   Object.keys(bySrc).forEach(k=>{ const list=bySrc[k], n=list.length; list.forEach((r,i)=>{ r.offsetHours=+(((r.interval||1)*i)/Math.max(1,n)).toFixed(3); }); });
   const spareCrop=donors.reduce((s,d)=>s+Math.max(0,d.avail),0);
-  const spareCarriers=donors.reduce((s,d)=>s+Math.max(0,d.merchAvail)+Math.max(0,d.shipAvail),0);
+  const spareCarriers=donors.reduce((s,d)=>s+carr[d.v.id].merch+carr[d.v.id].ship,0);
   const merchantBlocked = !balanced && !routes.length && hadDonors && freeCarriers<=0;
   let summary;
   if(balanced) summary="Every village has non-negative crop. Nothing to balance.";
-  else if(routes.length) summary=`${routes.length} route${routes.length>1?'s':''} proposed: moving ${fmt(routes.reduce((s,r)=>s+r.cropPerHour,0))} crop/h from ${new Set(routes.map(r=>r.from)).size} surplus to ${new Set(routes.map(r=>r.to)).size} draining village(s).`;
+  else if(routes.length){ const delivered=routes.filter(r=>r.relay!=="in").reduce((s,r)=>s+r.cropPerHour,0);
+    const relays=routes.filter(r=>r.relay==="in").length;
+    summary=`${routes.length} route${routes.length>1?'s':''} proposed: moving ${fmt(delivered)} crop/h to ${receivers.length-unmet.length} draining village(s)${relays?` (incl. ${relays} relayed via a hub)`:""}.`; }
   else if(merchantBlocked) summary="Donors have spare crop but no free carriers. Set Marketplace levels / trade ships (or the Default market lvl) - routes aren't suggested with 0 available carriers.";
   else summary="Draining villages exist, but no donor has spare crop above the safety margin.";
   return {routes,unmet,balanced,summary,merchantBlocked,spareCrop:Math.round(spareCrop),spareCarriers};
