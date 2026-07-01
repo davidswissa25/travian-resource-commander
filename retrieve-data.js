@@ -73,6 +73,7 @@
     const to  = lvl(await getText('/build.php?gid=28&newdid=' + v.id), 'Trade Office');
     const bar = lvl(await getText('/build.php?gid=19&newdid=' + v.id)); // gid 19 = Barracks
     const sta = lvl(await getText('/build.php?gid=20&newdid=' + v.id)); // gid 20 = Stable
+    const twn = lvl(await getText('/build.php?gid=24&newdid=' + v.id)); // gid 24 = Town Hall (celebrations)
     const d2 = await getText('/dorf2.php?newdid=' + v.id);
     const tid = +(d1.match(/"village":\s*\{[^}]*?"tribeId":\s*(\d+)/) || [])[1] || 0; // reliable even without a wall
     const wm = d2.match(/class="wall\s+([a-z]+)/i);
@@ -90,9 +91,9 @@
       baseConsumption: Math.max(0, l5 - l4),         // so net crop = l4
       marketplaceLevel: mkt, tradeOfficeLevel: to, merchantCapacityReal: cap,
       tradeShips: ships, shipCapacityReal: shipCap,
-      barracksLevel: bar, stableLevel: sta
+      barracksLevel: bar, stableLevel: sta, townHallLevel: twn
     });
-    log(`${v.name}: ${T.name} mkt${mkt} TO${to} bar${bar} sta${sta} cap${cap} ships${ships}${shipCap?('@'+shipCap):''} net${l4}`);
+    log(`${v.name}: ${T.name} mkt${mkt} TO${to} bar${bar} sta${sta} th${twn} cap${cap} ships${ships}${shipCap?('@'+shipCap):''} net${l4}`);
   }
   if (list[0]) await getText('/dorf1.php?newdid=' + list[0].id);   // restore active village
 

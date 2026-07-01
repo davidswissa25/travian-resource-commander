@@ -153,6 +153,7 @@
     const to  = lvl(await getText('/build.php?gid=28&newdid=' + v.id), 'Trade Office');
     const bar = lvl(await getText('/build.php?gid=19&newdid=' + v.id));
     const sta = lvl(await getText('/build.php?gid=20&newdid=' + v.id));
+    const twn = lvl(await getText('/build.php?gid=24&newdid=' + v.id)); // Town Hall
     const d2 = await getText('/dorf2.php?newdid=' + v.id);
     const tid = +(d1.match(/"village":\s*\{[^}]*?"tribeId":\s*(\d+)/) || [])[1] || 0; // reliable even without a wall
     const wm = d2.match(/class="wall\s+([a-z]+)/i);
@@ -169,9 +170,9 @@
       baseConsumption: Math.max(0, l5 - l4),
       marketplaceLevel: mkt, tradeOfficeLevel: to, merchantCapacityReal: cap,
       tradeShips: ships, shipCapacityReal: shipCap,
-      barracksLevel: bar, stableLevel: sta
+      barracksLevel: bar, stableLevel: sta, townHallLevel: twn
     });
-    log(v.name + ': ' + T.name + ' mkt' + mkt + ' TO' + to + ' bar' + bar + ' sta' + sta + ' cap' + cap + ' net' + l4);
+    log(v.name + ': ' + T.name + ' mkt' + mkt + ' TO' + to + ' bar' + bar + ' sta' + sta + ' th' + twn + ' cap' + cap + ' net' + l4);
   }
   if (list[0]) await getText('/dorf1.php?newdid=' + list[0].id);
   villages.sort((a, b) => String(a.name).localeCompare(String(b.name), undefined, { numeric: true, sensitivity: 'base' }));
@@ -317,6 +318,28 @@ const TROOPS = {
     ]
   }
 };
+// Celebrations (Town Hall). Costs are fixed; duration shrinks with Town Hall level and server speed.
+// Official Travian: small = 24h, great = 60h at level 1 on x1, x0.964 per extra level; unlock: small L1, great L10.
+// duration(h) = base * 0.964^(level-1) / (floor(speed/3)+1). To run 24/7 you pay one cost per duration.
+const CELEB = {
+  small: { cost:{lumber:6400, clay:6650, iron:5940, crop:500},   baseHours:24 },
+  great: { cost:{lumber:29700,clay:33250,iron:32000,crop:6700},  baseHours:60 }
+};
+// Duration in hours of the celebration a village would run (great if Town Hall >=10, else small).
+function celebrationDurationH(level, speed){
+  if(!level||level<1) return 0;
+  const c = level>=10 ? CELEB.great : CELEB.small;
+  return c.baseHours * Math.pow(0.964, level-1) / (Math.floor((speed||1)/3)+1);
+}
+// Resources/h needed to keep a celebration running back-to-back (0 if no Town Hall).
+function celebrationNeedsPerHour(v){
+  const z={lumber:0,clay:0,iron:0,crop:0}, lvl=v.townHallLevel||0;
+  if(lvl<1) return z;
+  const dur=celebrationDurationH(lvl, state.serverSpeed||1); if(dur<=0) return z;
+  const c=(lvl>=10?CELEB.great:CELEB.small).cost, out={};
+  RES.forEach(k=>out[k]=(c[k]||0)/dur);
+  return out;
+}
 const fmt = n => Math.round(n).toLocaleString();
 const signed = n => (n>=0?"+":"") + fmt(n);
 
@@ -424,7 +447,7 @@ function esc(s){ return String(s==null?"":s).replace(/[&<>"]/g,c=>({"&":"&amp;",
 
 /* ---- math ---- */
 function troopUpkeep(v){ return (v.troops||[]).reduce((s,t)=>s+(t.count||0)*(t.upkeep||0),0); }
-function consumption(v){ return (v.baseConsumption||0)+troopUpkeep(v); }
+function consumption(v){ return (v.baseConsumption||0)+troopUpkeep(v)+celebrationNeedsPerHour(v).crop; }
 function routeFlows(){
   const inn={}, out={};
   state.villages.forEach(v=>{ inn[v.id]={lumber:0,clay:0,iron:0,crop:0}; out[v.id]={lumber:0,clay:0,iron:0,crop:0}; });
@@ -562,12 +585,20 @@ function vcard(v,flows){
       ${hasNeeds?`<div style="margin-top:2px">Needs: <span style="color:var(--lumber)">${fmt(needs.lumber)}</span> + <span style="color:var(--clay)">${fmt(needs.clay)}</span> + <span style="color:var(--iron)">${fmt(needs.iron)}</span> /h</div>`:'<div style="color:var(--faint)">Configure troop in Edit to see needs.</div>'}
     </div>`;
   }
+  let celebInfo='';
+  if((v.townHallLevel||0)>=1){
+    const cn=celebrationNeedsPerHour(v), dur=celebrationDurationH(v.townHallLevel,state.serverSpeed||1), kind=v.townHallLevel>=10?'Great':'Small';
+    celebInfo=`<div style="font-size:11px;color:var(--dim);margin-top:6px;padding-top:6px;border-top:1px solid var(--line)">
+      &#127881; Town Hall L${v.townHallLevel} &middot; ${kind} celebration every ${hms(dur)}
+      <div style="margin-top:2px">Reserve: <span style="color:var(--lumber)">${fmt(cn.lumber)}</span> + <span style="color:var(--clay)">${fmt(cn.clay)}</span> + <span style="color:var(--iron)">${fmt(cn.iron)}</span> + <span style="color:var(--crop)">${fmt(cn.crop)}</span> /h</div>
+    </div>`;
+  }
   return `<div class="vcard ${cls}">
-    <div class="vhead"><span class="name">${esc(v.name)}</span><span class="coord">(${v.x||0}|${v.y||0})</span>${v.troopVillage?'<span class="troop-badge">&#9876; Troops</span>':''}<span class="grow"></span><span class="tribe">${esc(v.tribe)}</span></div>
+    <div class="vhead"><span class="name">${esc(v.name)}</span><span class="coord">(${v.x||0}|${v.y||0})</span>${v.troopVillage?'<span class="troop-badge">&#9876; Troops</span>':''}${(v.townHallLevel||0)>=1?'<span class="troop-badge">&#127881; TH'+v.townHallLevel+'</span>':''}<span class="grow"></span><span class="tribe">${esc(v.tribe)}</span></div>
     ${clock}
     <div class="bars">${bar("lumber","Lmbr")}${bar("clay","Clay")}${bar("iron","Iron")}${bar("crop","Crop")}</div>
     <div class="vmeta"><span>Net crop: <span class="netcrop" style="color:var(--${net>=0?'ok':'bad'})">${signed(net)}/h</span>${v.synced?'<span class="synced">synced</span>':''}</span><span>Upkeep: ${fmt(consumption(v))}/h</span></div>
-    ${troopInfo}
+    ${troopInfo}${celebInfo}
     <div class="vactions"><button class="sm${v.troopVillage?' primary':''}" onclick="toggleTroopVillage('${v.id}')" title="${v.troopVillage?'Remove troop-village flag':'Mark as troop-making village'}">&#9876;${v.troopVillage?' Troops':''}</button><button class="sm" onclick="openVillage('${v.id}')">Edit</button><button class="sm danger" onclick="delVillage('${v.id}')">Delete</button></div>
   </div>`;
 }
@@ -793,9 +824,10 @@ function optimizeTroopSupply(cropPlan){
   });
   const nonCrop=["lumber","clay","iron"], routes=[];
   const donors=state.villages.filter(v=>!v.troopVillage).map(v=>{
-    const net=netRates(v,flows);
+    const net=netRates(v,flows), cel=celebrationNeedsPerHour(v);
     const c=committed[v.id]||{merchants:0,ships:0}, ce=cropExtra[v.id]||{merchants:0,ships:0};
-    const avail={}; nonCrop.forEach(k=>avail[k]=Math.max(0,net[k]));
+    // reserve the donor's own 24/7 celebration need before it donates lumber/clay/iron
+    const avail={}; nonCrop.forEach(k=>avail[k]=Math.max(0,net[k]-(cel[k]||0)));
     return {v,avail,
       merchAvail:Math.max(0,maxMerchants(v)-c.merchants-ce.merchants),
       shipAvail:Math.max(0,maxShips(v)-c.ships-ce.ships)};
@@ -979,8 +1011,9 @@ function optimizeOverflow(cropPlan, troopPlan){
     // Donors: filling/overflowing on k, with surplus above the keep buffer.
     const donors=state.villages.map(v=>{
       const p=proj[v.id], net=p.net[k], cap=p.cap[k]||0, cur=p.cur[k];
+      const cel=celebrationNeedsPerHour(v)[k]||0;                     // reserve this village's 24/7 celebration need
       const eta = net>0.5 && cap>0 ? (cap-cur)/net : Infinity;
-      const give = (cap>0 && net>optMargin && (cur>=cap || eta<OVERFLOW_HORIZON)) ? net-optMargin : 0;
+      const give = (cap>0 && net-cel>optMargin && (cur>=cap || eta<OVERFLOW_HORIZON)) ? net-cel-optMargin : 0;
       return {v,give,fill:cap>0?cur/cap:0};
     }).filter(d=>d.give>0).sort((a,b)=>b.fill-a.fill);
     // Receivers: non-troop villages with real headroom, emptiest first.
@@ -1164,6 +1197,9 @@ function openVillage(id){
     ${num("Base merchant speed (fields/h)","f_mspd",v.merchantSpeed==null?t.merchantSpeed:v.merchantSpeed)}
     ${num("Trade Office level","f_to",v.tradeOfficeLevel,"0-20")}
     ${num("Marketplace level","f_mkt",v.marketplaceLevel,"= max merchants")}
+    <div class="sect">Celebrations (Town Hall) &mdash; reserves resources to run a celebration 24/7</div>
+    <div class="field"><label>Town Hall level (auto-fetched on pull)</label><input type="number" id="f_th" min="0" max="20" value="${v.townHallLevel||''}" placeholder="0 = none" oninput="updateCelebNeeds()"></div>
+    <div class="field full" id="celebNeedDisplay" style="font-size:12px;color:var(--dim);padding:4px 0"></div>
     <div class="sect">Trade ships (harbor) &mdash; ${SHIP.capacity}/ship at ${SHIP.speed} fields/h (game constant; alliance bonus applies)</div>
     ${num("Trade ships","f_ships",v.tradeShips,"0 = no harbor")}<div class="field"></div>
     <div class="sect">Troops (count &times; upkeep auto-sums into crop consumption)</div>
@@ -1172,7 +1208,19 @@ function openVillage(id){
   optTroopRows=(v.troops||[]).map(x=>({...x}));
   renderTroopRows();
   updateTroopNeeds();
+  updateCelebNeeds();
   document.getElementById("vOverlay").classList.add("show");
+}
+// Live readout of the 24/7 celebration resource cost for the Town Hall level being edited.
+function updateCelebNeeds(){
+  const el=document.getElementById("celebNeedDisplay"); if(!el) return;
+  const lvl=+(document.getElementById("f_th")||{}).value||0;
+  if(lvl<1){ el.innerHTML='<span style="color:var(--faint)">No Town Hall &mdash; no celebration reserve.</span>'; return; }
+  const n=celebrationNeedsPerHour({townHallLevel:lvl});
+  const dur=celebrationDurationH(lvl,state.serverSpeed||1), kind=lvl>=10?'Great':'Small';
+  el.innerHTML=`${kind} celebration every <b>${hms(dur)}</b> &mdash; reserves `
+    +`<span style="color:var(--lumber)">${fmt(n.lumber)}</span> + <span style="color:var(--clay)">${fmt(n.clay)}</span> + `
+    +`<span style="color:var(--iron)">${fmt(n.iron)}</span> + <span style="color:var(--crop)">${fmt(n.crop)}</span> /h to run 24/7.`;
 }
 // Generate <option> tags for a barracks/stable troop dropdown for the given tribe.
 function troopOptionsHTML(tribe, building, selected){
@@ -1245,6 +1293,7 @@ function saveVillage(){
     barracksTroop:document.getElementById("f_bar_troop").value||null,
     stableLevel:+(document.getElementById("f_sta_lvl").value)||0,
     stableTroop:document.getElementById("f_sta_troop").value||null,
+    townHallLevel:+(document.getElementById("f_th").value)||0,
     synced:editingV?editingV.synced:false, did:editingV?editingV.did:0, updatedAt:Date.now() };
   if(editingV){ const i=state.villages.findIndex(x=>x.id===v.id); state.villages[i]=v; }
   else state.villages.push(v);
@@ -1382,6 +1431,7 @@ function mergeSync(incoming, silent, prune){
       // barracks/stable levels come from game pull; troop config (troop type, priority) is user-set, never overwritten
       if(nv.barracksLevel!=null) ex.barracksLevel=nv.barracksLevel;
       if(nv.stableLevel!=null)   ex.stableLevel=nv.stableLevel;
+      if(nv.townHallLevel!=null) ex.townHallLevel=nv.townHallLevel; // for 24/7 celebration budgeting
       if(nv.synced){ ex.synced=true; ex.troops=[]; }
       ex.updatedAt=nv.updatedAt||Date.now();
       updated++;
@@ -1396,7 +1446,7 @@ function mergeSync(incoming, silent, prune){
         merchantCapacityReal:nv.merchantCapacityReal||0, tradeShips:nv.tradeShips||0,
         shipCapacityReal:nv.shipCapacityReal||0,
         troopVillage:false, troopPriority:1,
-        barracksLevel:nv.barracksLevel||0, stableLevel:nv.stableLevel||0,
+        barracksLevel:nv.barracksLevel||0, stableLevel:nv.stableLevel||0, townHallLevel:nv.townHallLevel||0,
         barracksTroop:null, stableTroop:null,
         synced:!!nv.synced, updatedAt:nv.updatedAt||Date.now() });
       added++;

@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Travian Commander - Pull & Sync bridge
 // @namespace    travian-commander
-// @version      1.4.1
+// @version      1.5.0
 // @description  One-click: a "Pull & Sync" button on the game retrieves every village's tribe, marketplace level, Trade Office level, barracks & stable levels, production, net crop, current resource storages (warehouse/granary stock + capacity), computed merchant capacity and active recurring trade routes, then pushes it straight into the Resource Commander tool (open in another tab) - no console, no file import. Read-only on the game.
 // @author       you
 // @match        *://*.travian.com/*
@@ -160,6 +160,7 @@
         const to = lvl(await getText('/build.php?gid=28&newdid=' + v.id), 'Trade Office');
         const bar = lvl(await getText('/build.php?gid=19&newdid=' + v.id)); // gid 19 = Barracks
         const sta = lvl(await getText('/build.php?gid=20&newdid=' + v.id)); // gid 20 = Stable
+        const twn = lvl(await getText('/build.php?gid=24&newdid=' + v.id)); // gid 24 = Town Hall (celebrations)
         const d2 = await getText('/dorf2.php?newdid=' + v.id);
         // tribe: prefer the village's tribeId from the page data (reliable even with no wall built),
         // fall back to the wall CSS class, then Romans.
@@ -180,7 +181,7 @@
           granary: { capacity: capOf(4), crop: stock(4) },
           marketplaceLevel: mkt, tradeOfficeLevel: to, merchantCapacityReal: cap,
           tradeShips: ships, shipCapacityReal: shipCap,
-          barracksLevel: bar, stableLevel: sta
+          barracksLevel: bar, stableLevel: sta, townHallLevel: twn
         });
         // recurring "Trade routes" for this village (read-only); active sends only
         const rtHtml = await getText('/build.php?gid=17&t=3&newdid=' + v.id);
