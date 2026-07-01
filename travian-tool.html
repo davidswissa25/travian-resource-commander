@@ -305,16 +305,16 @@ const TROOPS = {
       {name:"Marauder",             cost:{lumber:450,clay:560,iron:230},baseTime:4000},
     ]
   },
-  Spartans:{
+  Spartans:{ // official Travian Legends "Glory of Sparta" units (cost excl. crop; baseTime = seconds at building L1, x1)
     barracks:[
-      {name:"Mercenary (Spartan)",  cost:{lumber:130,clay:80,iron:40},  baseTime:1600},
-      {name:"Hoplon",               cost:{lumber:120,clay:150,iron:90}, baseTime:2133},
-      {name:"Armored Phalanx",      cost:{lumber:140,clay:150,iron:185},baseTime:3200},
+      {name:"Hoplite",             cost:{lumber:110,clay:185,iron:110},baseTime:1700},
+      {name:"Sentinel",            cost:{lumber:185,clay:150,iron:35}, baseTime:1232},
+      {name:"Shieldsman",          cost:{lumber:145,clay:95,iron:245}, baseTime:1936},
+      {name:"Twinsteel Therion",   cost:{lumber:130,clay:200,iron:400},baseTime:2112},
     ],
     stable:[
-      {name:"Corinthian",           cost:{lumber:220,clay:260,iron:90}, baseTime:2400},
-      {name:"Zephyros",             cost:{lumber:310,clay:390,iron:260},baseTime:3600},
-      {name:"Chalkaspis",           cost:{lumber:360,clay:330,iron:280},baseTime:4267},
+      {name:"Elpida Rider",        cost:{lumber:555,clay:445,iron:330},baseTime:2816},
+      {name:"Corinthian Crusher",  cost:{lumber:660,clay:495,iron:995},baseTime:3432},
     ]
   }
 };
@@ -604,20 +604,108 @@ function vcard(v,flows){
 }
 
 /* ---- optimizer ---- */
+// Build ONE unified plan: run crop balance (+ troop supply + overflow in all-in-one mode),
+// merge every proposed shipment sharing the same From->To into a single trade route carrying all
+// four resources, then guard against overfilling any granary/warehouse over time.
+const OVERFILL_HORIZON = 48; // h: allow filling a warehouse no faster than this
+function buildAutoPlan(mode){
+  const cropPlan=optimize();
+  const all = mode==='all';
+  const troopPlan = all ? optimizeTroopSupply(cropPlan) : {routes:[]};
+  const overflowPlan = all ? optimizeOverflow(cropPlan, troopPlan) : {routes:[]};
+  const merged={};
+  const addRoute=(r,tag)=>{
+    const iv=Math.max(1,Math.min(24,Math.round(r.interval||r.intervalHours||1)));
+    const key=r.from+">"+r.to;
+    const m=merged[key]||(merged[key]={from:r.from,to:r.to,fromName:r.fromName,toName:r.toName,
+      flow:{lumber:0,clay:0,iron:0,crop:0},interval:iv,merchants:0,ships:0,distance:r.distance||0,tags:new Set(),relay:null});
+    if(r.resources) RES.forEach(k=>m.flow[k]+=(r.resources[k]||0)/iv);
+    if(r.cropPerHour!=null) m.flow.crop+=r.cropPerHour;
+    m.merchants+=r.merchants||0; m.ships+=r.ships||0;
+    m.interval=Math.min(m.interval,iv);
+    if(r.distance) m.distance=r.distance;
+    if(r.relay) m.relay=r.relay;
+    m.tags.add(tag);
+  };
+  cropPlan.routes.forEach(r=>addRoute(r,"crop"));
+  troopPlan.routes.forEach(r=>addRoute(r,"troops"));
+  overflowPlan.routes.forEach(r=>addRoute(r,"overflow"));
+  let routes=Object.values(merged);
+  // ---- overfill guard: cap each receiver's added inflow so its store can't exceed capacity over time ----
+  const f0=routeFlows(); // existing (already-saved) routes only
+  state.villages.forEach(v=>{
+    RES.forEach(k=>{
+      const inn=routes.filter(r=>r.to===v.id && r.flow[k]>0);
+      const totalIn=inn.reduce((s,r)=>s+r.flow[k],0); if(totalIn<=0) return;
+      const cap=(k==='crop'?(v.granary&&v.granary.capacity):(v.warehouse&&v.warehouse.capacity))||0;
+      const cur=(k==='crop'?(v.granary&&v.granary.crop):(v.warehouse&&v.warehouse[k]))||0;
+      let base=(v.prod&&v.prod[k])||0; if(k==='crop') base-=consumption(v); // own rate before this plan
+      base += ((f0.inn[v.id]&&f0.inn[v.id][k])||0) - ((f0.out[v.id]&&f0.out[v.id][k])||0);
+      routes.forEach(r=>{ if(r.from===v.id) base-=r.flow[k]; }); // subtract this plan's own outflow (relay hubs forward what they receive)
+      // crop: never push net above 0 (keep granary from filling); l/c/i: allow filling no faster than the horizon
+      const allowed = k==='crop' ? Math.max(0,-base) : (cap>0 ? Math.max(0, (cap-cur)/OVERFILL_HORIZON - base) : totalIn);
+      if(totalIn>allowed+0.5){ const scale=allowed/totalIn; inn.forEach(r=>r.flow[k]*=scale); }
+    });
+  });
+  routes.forEach(r=>{ r.resources={}; RES.forEach(k=>r.resources[k]=Math.round(r.flow[k]*r.interval)); r.tags=[...r.tags]; });
+  routes=routes.filter(r=>RES.some(k=>r.resources[k]>=1));
+  const bySrc={}; routes.forEach(r=>(bySrc[r.from]=bySrc[r.from]||[]).push(r));
+  Object.values(bySrc).forEach(list=>list.forEach((r,i)=>r.offsetHours=+((r.interval*i/Math.max(1,list.length)).toFixed(3))));
+  // summary
+  const moved={lumber:0,clay:0,iron:0,crop:0}; routes.forEach(r=>RES.forEach(k=>moved[k]+=r.flow[k]));
+  const parts=[]; if(moved.crop>=1) parts.push(fmt(moved.crop)+" crop"); ["lumber","clay","iron"].forEach(k=>{ if(moved[k]>=1) parts.push(fmt(moved[k])+" "+k); });
+  const summary = routes.length
+    ? `${routes.length} trade route${routes.length>1?'s':''} across ${Object.keys(bySrc).length} village(s), moving ${parts.join(" + ")||"—"} per hour.`
+    : (cropPlan.balanced && all ? "Everything is balanced — no crop deficit, no troop/celebration shortfall, no overflow." : cropPlan.summary);
+  const unmetNote = cropPlan.unmet && cropPlan.unmet.length
+    ? `<p class="note">&#9888; Crop still uncovered: ${cropPlan.unmet.map(u=>esc(u.name)+" ("+fmt(u.need)+"/h short)").join(", ")}.</p>` : "";
+  return {routes, summary, unmetNote, cropPlan};
+}
+function renderUnified(plan){
+  const vName=id=>{const v=state.villages.find(x=>x.id===id);return v?v.name:'?';};
+  const bySrc={}; plan.routes.forEach(r=>(bySrc[r.from]=bySrc[r.from]||[]).push(r));
+  const cell=(val,col)=>`<td class="num" style="color:var(--${col})">${val>=1?fmt(val):'<span style="color:var(--faint)">&mdash;</span>'}</td>`;
+  let html=`<table><thead><tr><th>To</th><th class="num">Lumber</th><th class="num">Clay</th><th class="num">Iron</th><th class="num">Crop</th><th class="num">Every</th><th class="num">Carriers</th><th>Purpose</th><th></th></tr></thead><tbody>`;
+  Object.keys(bySrc).sort((a,b)=>String(vName(a)).localeCompare(String(vName(b)),undefined,{numeric:true})).forEach(src=>{
+    const list=bySrc[src];
+    html+=`<tr><td colspan="9" style="background:var(--panel2);font-weight:650">&#128666; ${esc(vName(src))} &mdash; ${list.length} route${list.length>1?'s':''}</td></tr>`;
+    list.forEach(r=>{
+      const carriers=`${r.merchants}&#128722;`+(r.ships?` + ${r.ships}&#9973;`:'');
+      const fromV=state.villages.find(v=>v.id===r.from), toV=state.villages.find(v=>v.id===r.to);
+      const sl=sendLinkRes(fromV,toV,r.resources);
+      html+=`<tr>
+        <td>&rarr; ${esc(r.toName||vName(r.to))}${r.relay?' <span class="troop-badge">hub</span>':''}</td>
+        ${cell(r.resources.lumber,'lumber')}${cell(r.resources.clay,'clay')}${cell(r.resources.iron,'iron')}${cell(r.resources.crop,'crop')}
+        <td class="num">${r.interval}h${r.offsetHours?(' @'+hhmm(r.offsetHours)):''}</td>
+        <td class="num" title="merchants + trade ships">${carriers}</td>
+        <td style="font-size:11px;color:var(--dim)">${r.tags.join(' + ')}</td>
+        <td>${sl?'<a href="'+sl+'" target="_blank" style="color:var(--accent)">Send&#8599;</a>':''}</td>
+      </tr>`;
+    });
+  });
+  html+=`</tbody></table>
+    <p class="note">Each row is one trade route carrying all four resources at once. Interval = round-trip so carriers recycle; inflows are capped so no granary/warehouse overfills within ${OVERFILL_HORIZON}h. Carriers combine the crop, troop and overflow needs (upper bound when merged).</p>`;
+  return html;
+}
+function applyAutoPlan(){
+  const plan=buildAutoPlan(optMode);
+  plan.routes.forEach(r=>state.routes.push({id:uid(),from:r.from,to:r.to,
+    resources:{lumber:r.resources.lumber||0,clay:r.resources.clay||0,iron:r.resources.iron||0,crop:r.resources.crop||0},
+    intervalHours:r.interval,merchants:r.merchants,ships:r.ships||0,offsetHours:r.offsetHours||0,auto:true}));
+  save(); setTab("routes");
+  if(!plan.routes.length) alert("Nothing to apply — no routes were proposed.");
+}
 function renderOptimizer(){
   const el=document.getElementById("tab-optimizer");
   if(state.villages.length<2){ el.innerHTML=`<div class="empty"><h3>Need at least 2 villages</h3><p>The optimizer moves surplus crop to villages that are draining.</p></div>`; return; }
-  const plan=optimize();
-  const troopPlan=optimizeTroopSupply(plan);
-  const overflowPlan=optMode==='all'?optimizeOverflow(plan,troopPlan):{routes:[]};
-  const allN=plan.routes.length+troopPlan.routes.length+overflowPlan.routes.length;
+  const plan=buildAutoPlan(optMode);
   el.innerHTML=`
     <div class="opt-controls">
       <strong>&#9889; Auto routes</strong>
       <label>Mode:
         <select onchange="optMode=this.value;renderOptimizer()">
           <option value="crop" ${optMode==='crop'?'selected':''}>Crop only (anti-starvation)</option>
-          <option value="all" ${optMode==='all'?'selected':''}>All-in-one (crop + troops + overflow)</option>
+          <option value="all" ${optMode==='all'?'selected':''}>All-in-one (crop + troops + celebrations + overflow)</option>
         </select></label>
       <label title="Crop/h to leave as a buffer in each surplus village before it donates">Keep buffer /h: <input type="number" value="${optMargin}" style="width:64px" onchange="optMargin=+this.value;renderOptimizer()"></label>
       <label title="Smallest route worth creating - fewer, larger routes">Min route /h: <input type="number" value="${optMinRoute}" style="width:64px" onchange="optMinRoute=+this.value;renderOptimizer()"></label>
@@ -626,20 +714,11 @@ function renderOptimizer(){
       <label title="Merchants per village if not set individually (= marketplace level)">Default market lvl: <input type="number" value="${state.defaultMarket||0}" style="width:56px" onchange="state.defaultMarket=+this.value||0;save();renderAll()"></label>
       <label>Server URL: <input type="text" value="${esc(state.serverUrl||'')}" placeholder="https://rof.x2.europe.travian.com" style="width:220px" onchange="state.serverUrl=this.value.trim().replace(/\/+$/,'');detectServerSpeed(state.serverUrl);renderAll()"></label>
       <div class="grow"></div>
-      ${optMode==='all'
-        ? `<button class="ghost" onclick="applyPlan()" ${plan.routes.length?'':'disabled'} title="Apply only the crop-balancing routes">Apply crop (${plan.routes.length})</button>
-           <button class="primary" onclick="applyAll()" ${allN?'':'disabled'} title="Apply crop balance + troop supply + overflow routes in one go">&#9889; Apply ALL (${allN})</button>`
-        : `<button class="primary" onclick="applyPlan()" ${plan.routes.length?'':'disabled'}>Apply ${plan.routes.length} route${plan.routes.length===1?'':'s'}</button>`}
+      <button class="primary" onclick="applyAutoPlan()" ${plan.routes.length?'':'disabled'}>Apply ${plan.routes.length} route${plan.routes.length===1?'':'s'}</button>
     </div>
     <p class="note">${plan.summary}</p>
-    ${plan.routes.length ? planTable(plan) : `<div class="empty"><h3>${plan.balanced?'&#9989; Account is balanced':plan.merchantBlocked?'&#9650; No merchants available':'No feasible routes'}</h3><p>${plan.balanced?'No village is starving, or no donor has spare crop after the safety margin.':plan.merchantBlocked?'Donors have spare crop, but their Marketplace level gives 0 free merchants (or all are tied up by existing routes). Set each village&rsquo;s Marketplace level, or the Default market lvl above.':'Deficit villages exist but no donor has spare crop. Reduce upkeep, raise crop fields, or NPC-trade.'}</p></div>`}
-    ${plan.unmet.length?`<p class="note">&#9888; Still uncovered: ${plan.unmet.map(u=>esc(u.name)+" ("+fmt(u.need)+"/h short)").join(", ")}. ${
-      plan.spareCrop>0 && plan.spareCarriers<=0
-        ? "<b>Carrier-limited:</b> donors still hold "+fmt(plan.spareCrop)+" crop/h of surplus but have no free merchants/ships left. Raise Marketplace levels, add trade ships, or raise the Default market lvl."
-        : plan.spareCrop>0
-          ? "Remaining surplus is too far / too small per donor to form a route above Min route /h ("+fmt(optMinRoute)+"). Lower Min route /h to use it."
-          : "Donors are out of spare crop above the Keep buffer ("+fmt(optMargin)+"/h)."
-    }</p>`:""}${renderTroopSection(plan)}${optMode==='all'?renderOverflowSection(plan):''}`;
+    ${plan.routes.length ? renderUnified(plan) : `<div class="empty"><h3>&#9989; Nothing to route</h3><p>No crop deficits${optMode==='all'?', troop/celebration shortfalls or overflow':''} that a donor can cover right now.</p></div>`}
+    ${plan.unmetNote}`;
 }
 function planTable(plan){
   return `<table><thead><tr>
