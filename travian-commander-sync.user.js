@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Travian Commander - Pull & Sync bridge
 // @namespace    travian-commander
-// @version      1.5.0
+// @version      1.6.0
 // @description  One-click: a "Pull & Sync" button on the game retrieves every village's tribe, marketplace level, Trade Office level, barracks & stable levels, production, net crop, current resource storages (warehouse/granary stock + capacity), computed merchant capacity and active recurring trade routes, then pushes it straight into the Resource Commander tool (open in another tab) - no console, no file import. Read-only on the game.
 // @author       you
 // @match        *://*.travian.com/*
@@ -129,6 +129,29 @@
       return out;
     }
 
+    // Parse trainable units from a Barracks/Stable page: real per-server cost + the training
+    // time AT THIS village's current building level (already includes level & bonuses), so the
+    // sustainable rate is simply 3600 / seconds. No hardcoded unit table needed.
+    function parseUnits(html, building) {
+      const out = []; let doc;
+      try { doc = new DOMParser().parseFromString(html, 'text/html'); } catch (e) { return out; }
+      doc.querySelectorAll('.innerTroopWrapper[data-troopID]').forEach(w => {
+        const id = w.getAttribute('data-troopID');
+        const name = (w.innerHTML.match(/unitZoom\(\s*\d+\s*,\s*'([^']*)'/) || [])[1] || id;
+        const cost = { lumber: 0, clay: 0, iron: 0, crop: 0 };
+        w.querySelectorAll('.resourceWrapper .inlineIcon.resource').forEach(r => {
+          const t = (r.getAttribute('title') || '').toLowerCase();
+          const val = parseInt(clean((r.querySelector('.value') || {}).textContent).replace(/[^\d]/g, ''), 10) || 0;
+          if (t === 'lumber') cost.lumber = val; else if (t === 'clay') cost.clay = val;
+          else if (t === 'iron') cost.iron = val; else if (t === 'crop') cost.crop = val;
+        });
+        const p = clean((w.querySelector('.inlineIcon.duration .value') || {}).textContent).split(':').map(n => +n || 0);
+        const secs = p.length === 3 ? p[0] * 3600 + p[1] * 60 + p[2] : p.length === 2 ? p[0] * 60 + p[1] : 0;
+        if (secs > 0) out.push({ id, name, building, cost, seconds: secs });
+      });
+      return out;
+    }
+
     async function pullAll(onProgress) {
       const root = await getText('/dorf1.php');
       const i = root.indexOf('"villageList":');
@@ -158,8 +181,9 @@
         const capOf = k => Math.max(0, Math.round(+mx['l' + k] || 0)); // l1-l3 warehouse, l4 granary
         const mkt = lvl(await getText('/build.php?gid=17&newdid=' + v.id));
         const to = lvl(await getText('/build.php?gid=28&newdid=' + v.id), 'Trade Office');
-        const bar = lvl(await getText('/build.php?gid=19&newdid=' + v.id)); // gid 19 = Barracks
-        const sta = lvl(await getText('/build.php?gid=20&newdid=' + v.id)); // gid 20 = Stable
+        const barHtml = await getText('/build.php?gid=19&newdid=' + v.id), bar = lvl(barHtml); // gid 19 = Barracks
+        const staHtml = await getText('/build.php?gid=20&newdid=' + v.id), sta = lvl(staHtml); // gid 20 = Stable
+        const trainable = parseUnits(barHtml, 'barracks').concat(parseUnits(staHtml, 'stable')); // real per-server unit cost + training time
         const twn = lvl(await getText('/build.php?gid=24&newdid=' + v.id)); // gid 24 = Town Hall (celebrations)
         const d2 = await getText('/dorf2.php?newdid=' + v.id);
         // tribe: prefer the village's tribeId from the page data (reliable even with no wall built),
@@ -181,7 +205,7 @@
           granary: { capacity: capOf(4), crop: stock(4) },
           marketplaceLevel: mkt, tradeOfficeLevel: to, merchantCapacityReal: cap,
           tradeShips: ships, shipCapacityReal: shipCap,
-          barracksLevel: bar, stableLevel: sta, townHallLevel: twn
+          barracksLevel: bar, stableLevel: sta, townHallLevel: twn, trainable
         });
         // recurring "Trade routes" for this village (read-only); active sends only
         const rtHtml = await getText('/build.php?gid=17&t=3&newdid=' + v.id);

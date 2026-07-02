@@ -1256,9 +1256,9 @@ function openVillage(id){
       <div class="field"><label>Priority (1 = first supplied)</label><input type="number" id="f_priority" min="1" value="${v.troopPriority||1}"></div>
       <div class="field"></div>
       <div class="field"><label>Barracks level (auto-fetched on pull)</label><input type="number" id="f_bar_lvl" min="0" max="20" value="${v.barracksLevel||''}" placeholder="0" oninput="updateTroopNeeds()"></div>
-      <div class="field"><label>Train in barracks</label><select id="f_bar_troop" onchange="updateTroopNeeds()">${troopOptionsHTML(v.tribe||'Romans','barracks',v.barracksTroop)}</select></div>
+      <div class="field"><label>Train in barracks</label><select id="f_bar_troop" onchange="updateTroopNeeds()">${troopOptionsHTML(v.trainable,'barracks',v.barracksTroop)}</select></div>
       <div class="field"><label>Stable level (auto-fetched on pull)</label><input type="number" id="f_sta_lvl" min="0" max="20" value="${v.stableLevel||''}" placeholder="0" oninput="updateTroopNeeds()"></div>
-      <div class="field"><label>Train in stable</label><select id="f_sta_troop" onchange="updateTroopNeeds()">${troopOptionsHTML(v.tribe||'Romans','stable',v.stableTroop)}</select></div>
+      <div class="field"><label>Train in stable</label><select id="f_sta_troop" onchange="updateTroopNeeds()">${troopOptionsHTML(v.trainable,'stable',v.stableTroop)}</select></div>
       <div class="field full" id="troopNeedsDisplay" style="font-size:12px;color:var(--dim);padding:4px 0"></div>
     </div>
     <div class="sect">Production /h</div>
@@ -1302,49 +1302,38 @@ function updateCelebNeeds(){
     +`<span style="color:var(--iron)">${fmt(n.iron)}</span> + <span style="color:var(--crop)">${fmt(n.crop)}</span> /h to run 24/7.`;
 }
 // Generate <option> tags for a barracks/stable troop dropdown for the given tribe.
-function troopOptionsHTML(tribe, building, selected){
-  const list=(TROOPS[tribe]||{})[building]||[];
+// Dropdown of the units actually trainable in this village (captured from its Barracks/Stable
+// pages on Pull & Sync), with the real per-hour output at the current building level.
+function troopOptionsHTML(trainable, building, selected){
+  const list=(trainable||[]).filter(u=>u.building===building);
   return `<option value="">&#8212; none / skip &#8212;</option>`+
-    list.map(t=>`<option value="${esc(t.name)}"${t.name===selected?' selected':''}>${esc(t.name)}</option>`).join('');
+    list.map(u=>`<option value="${esc(u.name)}"${u.name===selected?' selected':''}>${esc(u.name)} (${fmt(3600/u.seconds)}/h)</option>`).join('');
 }
-// Resources/h needed to keep barracks + stable running 24/7 at their configured levels.
-// Training time at level L: baseTime / serverSpeed * 0.99^(L-1).
+// Resources/h to keep the chosen barracks + stable units training 24/7. Uses the real per-server
+// unit cost and the training time captured at the village's current building level (rate=3600/s).
 function troopNeedsPerHour(v){
-  const needs={lumber:0,clay:0,iron:0};
-  const tribe=TROOPS[v.tribe]; if(!tribe) return needs;
-  const speed=state.serverSpeed||1;
-  const addRate=(building,level,troopName)=>{
-    if(!level||!troopName) return;
-    const t=building.find(x=>x.name===troopName); if(!t) return;
-    const secsPerTroop=t.baseTime/speed*Math.pow(0.99,Math.max(0,level-1));
-    const ratePerHour=3600/secsPerTroop;
-    ['lumber','clay','iron'].forEach(k=>{ needs[k]+=ratePerHour*(t.cost[k]||0); });
-  };
-  addRate(tribe.barracks, v.barracksLevel, v.barracksTroop);
-  addRate(tribe.stable,   v.stableLevel,   v.stableTroop);
+  const needs={lumber:0,clay:0,iron:0,crop:0}, list=v.trainable||[];
+  const add=name=>{ if(!name) return; const u=list.find(x=>x.name===name); if(!u||!u.seconds) return;
+    const rate=3600/u.seconds; RES.forEach(k=>needs[k]+=rate*((u.cost&&u.cost[k])||0)); };
+  add(v.barracksTroop); add(v.stableTroop);
   return needs;
 }
 function syncMerchant(){
-  const tribe=document.getElementById("f_tribe").value;
-  const t=TRIBES[tribe]; if(t){ document.getElementById("f_mcap").value=t.merchantCapacity; document.getElementById("f_mspd").value=t.merchantSpeed; }
-  // Refresh troop dropdowns to match the newly selected tribe
-  const bd=document.getElementById("f_bar_troop"), sd=document.getElementById("f_sta_troop");
-  if(bd) bd.innerHTML=troopOptionsHTML(tribe,"barracks",bd.value);
-  if(sd) sd.innerHTML=troopOptionsHTML(tribe,"stable",sd.value);
-  updateTroopNeeds();
+  const t=TRIBES[document.getElementById("f_tribe").value];
+  if(t){ document.getElementById("f_mcap").value=t.merchantCapacity; document.getElementById("f_mspd").value=t.merchantSpeed; }
+  // troop dropdowns come from the village's captured units, not the tribe - no rebuild needed
 }
 function updateTroopNeeds(){
   const el=document.getElementById("troopNeedsDisplay"); if(!el) return;
-  const tribe=(document.getElementById("f_tribe")||{}).value||"Romans";
-  const barLvl=+(document.getElementById("f_bar_lvl")||{}).value||0;
-  const barTroop=((document.getElementById("f_bar_troop")||{}).value)||"";
-  const staLvl=+(document.getElementById("f_sta_lvl")||{}).value||0;
-  const staTroop=((document.getElementById("f_sta_troop")||{}).value)||"";
-  const needs=troopNeedsPerHour({tribe,barracksLevel:barLvl,barracksTroop:barTroop,stableLevel:staLvl,stableTroop:staTroop});
+  const list=(editingV&&editingV.trainable)||[];
+  const bt=((document.getElementById("f_bar_troop")||{}).value)||"";
+  const st=((document.getElementById("f_sta_troop")||{}).value)||"";
+  const needs=troopNeedsPerHour({trainable:list,barracksTroop:bt,stableTroop:st});
   const total=needs.lumber+needs.clay+needs.iron;
-  el.innerHTML=total>=1
+  el.innerHTML=(total>=1)
     ? `24/7 supply: <span style="color:var(--lumber)">${fmt(needs.lumber)} Lmbr</span> + <span style="color:var(--clay)">${fmt(needs.clay)} Clay</span> + <span style="color:var(--iron)">${fmt(needs.iron)} Iron</span> /h`
-    : `<span style="color:var(--faint)">Select barracks/stable troop to see hourly resource requirements.</span>`;
+      +(needs.crop>=1?` <span style="color:var(--faint)">(+${fmt(needs.crop)} crop)</span>`:'')
+    : `<span style="color:var(--faint)">${list.length?'Select a barracks/stable unit to see hourly needs.':'No trained units captured yet — Pull &amp; Sync this village first.'}</span>`;
 }
 function renderTroopRows(){
   document.getElementById("troopBox").innerHTML = optTroopRows.map((t,i)=>`
@@ -1511,6 +1500,7 @@ function mergeSync(incoming, silent, prune){
       if(nv.barracksLevel!=null) ex.barracksLevel=nv.barracksLevel;
       if(nv.stableLevel!=null)   ex.stableLevel=nv.stableLevel;
       if(nv.townHallLevel!=null) ex.townHallLevel=nv.townHallLevel; // for 24/7 celebration budgeting
+      if(nv.trainable) ex.trainable=nv.trainable; // per-server unit cost + training time (from Barracks/Stable pages)
       if(nv.synced){ ex.synced=true; ex.troops=[]; }
       ex.updatedAt=nv.updatedAt||Date.now();
       updated++;
@@ -1526,7 +1516,7 @@ function mergeSync(incoming, silent, prune){
         shipCapacityReal:nv.shipCapacityReal||0,
         troopVillage:false, troopPriority:1,
         barracksLevel:nv.barracksLevel||0, stableLevel:nv.stableLevel||0, townHallLevel:nv.townHallLevel||0,
-        barracksTroop:null, stableTroop:null,
+        barracksTroop:null, stableTroop:null, trainable:nv.trainable||[],
         synced:!!nv.synced, updatedAt:nv.updatedAt||Date.now() });
       added++;
     }
