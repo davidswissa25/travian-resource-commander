@@ -340,12 +340,12 @@ function celebrationNeedsPerHour(v){
   RES.forEach(k=>out[k]=(c[k]||0)/dur);
   return out;
 }
-const BUILD_BUFFER = 1000; // extra lumber/clay/iron per hour kept in a village that is still building
-// Resources/h a village should keep for itself before donating: 24/7 celebration + a build buffer.
+const BUILD_BUFFER = 1000; // lumber/clay/iron per hour to leave in a village that is still building
+// Resources a village should keep for itself (not donate / not be drained): its 24/7 celebration
+// cost plus, if still building, an extra BUILD_BUFFER of lumber/clay/iron per hour.
 function keepReserve(v){
-  const c=celebrationNeedsPerHour(v), b=v.stillBuilding?BUILD_BUFFER:0, out={lumber:0,clay:0,iron:0,crop:0};
-  RES.forEach(k=>out[k]=(c[k]||0)+(k==='crop'?0:b));
-  return out;
+  const c=celebrationNeedsPerHour(v), b=v.stillBuilding?BUILD_BUFFER:0;
+  return {lumber:(c.lumber||0)+b, clay:(c.clay||0)+b, iron:(c.iron||0)+b, crop:c.crop||0};
 }
 const fmt = n => Math.round(n).toLocaleString();
 const signed = n => (n>=0?"+":"") + fmt(n);
@@ -613,7 +613,7 @@ function vcard(v,flows){
     <div class="bars">${bar("lumber","Lmbr")}${bar("clay","Clay")}${bar("iron","Iron")}${bar("crop","Crop")}</div>
     <div class="vmeta"><span>Net crop: <span class="netcrop" style="color:var(--${net>=0?'ok':'bad'})">${signed(net)}/h</span>${v.synced?'<span class="synced">synced</span>':''}</span><span>Upkeep: ${fmt(consumption(v))}/h</span></div>
     ${troopInfo}${celebInfo}
-    <div class="vactions"><button class="sm${v.troopVillage?' primary':''}" onclick="toggleTroopVillage('${v.id}')" title="${v.troopVillage?'Remove troop-village flag':'Mark as troop-making village'}">&#9876;${v.troopVillage?' Troops':''}</button><button class="sm" onclick="openVillage('${v.id}')">Edit</button><button class="sm danger" onclick="delVillage('${v.id}')">Delete</button></div>
+    <div class="vactions"><button class="sm${v.troopVillage?' primary':''}" onclick="toggleTroopVillage('${v.id}')" title="${v.troopVillage?'Remove troop-village flag':'Mark as troop-making village'}">&#9876;${v.troopVillage?' Troops':''}</button><button class="sm${v.stillBuilding?' primary':''}" onclick="toggleStillBuilding('${v.id}')" title="${v.stillBuilding?'Done building — stop reserving':'Still building — keep an extra '+fmt(BUILD_BUFFER)+'/h lumber/clay/iron here'}">&#128679;${v.stillBuilding?' Building':''}</button><button class="sm" onclick="openVillage('${v.id}')">Edit</button><button class="sm danger" onclick="delVillage('${v.id}')">Delete</button></div>
   </div>`;
 }
 
@@ -1405,6 +1405,10 @@ function delVillage(id){
 function toggleTroopVillage(id){
   const v=state.villages.find(v=>v.id===id); if(!v) return;
   v.troopVillage=!v.troopVillage; save(); renderAll();
+}
+function toggleStillBuilding(id){
+  const v=state.villages.find(v=>v.id===id); if(!v) return;
+  v.stillBuilding=!v.stillBuilding; save(); renderAll();
 }
 function closeVillage(){ document.getElementById("vOverlay").classList.remove("show"); }
 
