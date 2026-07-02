@@ -580,8 +580,9 @@ function vcard(v,flows){
     const sInfo=v.stableLevel?`Stable L${v.stableLevel}${v.stableTroop?' &middot; '+esc(v.stableTroop):''}`:null;
     const bldg=[bInfo,sInfo].filter(Boolean).join(' &nbsp;|&nbsp; ');
     const pri=v.troopPriority&&v.troopPriority>1?` &middot; Priority ${v.troopPriority}`:'';
+    const trn=(v.trainerArtifact||state.greatTrainer)?` &middot; <span style="color:var(--accent)">Trainer &times;${trainerFactor(v)}</span>`:'';
     troopInfo=`<div style="font-size:11px;color:var(--dim);margin-top:6px;padding-top:6px;border-top:1px solid var(--line)">
-      ${bldg?`<div>${bldg}${pri}</div>`:''}
+      ${bldg?`<div>${bldg}${pri}${trn}</div>`:''}
       ${hasNeeds?`<div style="margin-top:2px">Needs: <span style="color:var(--lumber)">${fmt(needs.lumber)}</span> + <span style="color:var(--clay)">${fmt(needs.clay)}</span> + <span style="color:var(--iron)">${fmt(needs.iron)}</span> /h</div>`:'<div style="color:var(--faint)">Configure troop in Edit to see needs.</div>'}
     </div>`;
   }
@@ -712,6 +713,7 @@ function renderOptimizer(){
       <label title="Auto-detected from the server name (e.g. x2)">Server speed: <b style="color:var(--accent);margin-left:4px">&times;${state.serverSpeed||1}</b></label>
       <label title="Alliance commerce bonus % to merchant capacity">Alliance trade %: <input type="number" value="${state.allianceBonus||0}" style="width:60px" onchange="state.allianceBonus=+this.value||0;save();renderAll()"></label>
       <label title="Merchants per village if not set individually (= marketplace level)">Default market lvl: <input type="number" value="${state.defaultMarket||0}" style="width:56px" onchange="state.defaultMarket=+this.value||0;save();renderAll()"></label>
+      <label title="Great Trainer artifact: all villages train in 3/4 of the time (raises troop-village supply needs)"><input type="checkbox" ${state.greatTrainer?'checked':''} onchange="state.greatTrainer=this.checked;save();renderAll()"> Great Trainer</label>
       <label>Server URL: <input type="text" value="${esc(state.serverUrl||'')}" placeholder="https://rof.x2.europe.travian.com" style="width:220px" onchange="state.serverUrl=this.value.trim().replace(/\/+$/,'');detectServerSpeed(state.serverUrl);renderAll()"></label>
       <div class="grow"></div>
       <button class="primary" onclick="applyAutoPlan()" ${plan.routes.length?'':'disabled'}>Apply ${plan.routes.length} route${plan.routes.length===1?'':'s'}</button>
@@ -1259,6 +1261,7 @@ function openVillage(id){
       <div class="field"><label>Train in barracks</label><select id="f_bar_troop" onchange="updateTroopNeeds()">${troopOptionsHTML(v.trainable,'barracks',v.barracksTroop)}</select></div>
       <div class="field"><label>Stable level (auto-fetched on pull)</label><input type="number" id="f_sta_lvl" min="0" max="20" value="${v.stableLevel||''}" placeholder="0" oninput="updateTroopNeeds()"></div>
       <div class="field"><label>Train in stable</label><select id="f_sta_troop" onchange="updateTroopNeeds()">${troopOptionsHTML(v.trainable,'stable',v.stableTroop)}</select></div>
+      <div class="field full"><label style="display:flex;align-items:center;gap:8px;cursor:pointer"><input type="checkbox" id="f_trainer" ${v.trainerArtifact?'checked':''} oninput="updateTroopNeeds()"> <span>Trainer artifact here &mdash; trains in &frac12; the time (doubles this village&rsquo;s supply need)</span></label></div>
       <div class="field full" id="troopNeedsDisplay" style="font-size:12px;color:var(--dim);padding:4px 0"></div>
     </div>
     <div class="sect">Production /h</div>
@@ -1311,10 +1314,14 @@ function troopOptionsHTML(trainable, building, selected){
 }
 // Resources/h to keep the chosen barracks + stable units training 24/7. Uses the real per-server
 // unit cost and the training time captured at the village's current building level (rate=3600/s).
+// Trainer artifact: unique/small trains in HALF the time in its village; the great version is
+// 3/4 time across all villages. Stronger (smaller) multiplier wins. Less time -> more troops/h
+// -> proportionally more resources needed.
+function trainerFactor(v){ return Math.min((v&&v.trainerArtifact)?0.5:1, state.greatTrainer?0.75:1); }
 function troopNeedsPerHour(v){
-  const needs={lumber:0,clay:0,iron:0,crop:0}, list=v.trainable||[];
+  const needs={lumber:0,clay:0,iron:0,crop:0}, list=v.trainable||[], f=trainerFactor(v);
   const add=name=>{ if(!name) return; const u=list.find(x=>x.name===name); if(!u||!u.seconds) return;
-    const rate=3600/u.seconds; RES.forEach(k=>needs[k]+=rate*((u.cost&&u.cost[k])||0)); };
+    const rate=3600/(u.seconds*f); RES.forEach(k=>needs[k]+=rate*((u.cost&&u.cost[k])||0)); };
   add(v.barracksTroop); add(v.stableTroop);
   return needs;
 }
@@ -1328,7 +1335,8 @@ function updateTroopNeeds(){
   const list=(editingV&&editingV.trainable)||[];
   const bt=((document.getElementById("f_bar_troop")||{}).value)||"";
   const st=((document.getElementById("f_sta_troop")||{}).value)||"";
-  const needs=troopNeedsPerHour({trainable:list,barracksTroop:bt,stableTroop:st});
+  const tr=!!(document.getElementById("f_trainer")||{}).checked;
+  const needs=troopNeedsPerHour({trainable:list,barracksTroop:bt,stableTroop:st,trainerArtifact:tr});
   const total=needs.lumber+needs.clay+needs.iron;
   el.innerHTML=(total>=1)
     ? `24/7 supply: <span style="color:var(--lumber)">${fmt(needs.lumber)} Lmbr</span> + <span style="color:var(--clay)">${fmt(needs.clay)} Clay</span> + <span style="color:var(--iron)">${fmt(needs.iron)} Iron</span> /h`
@@ -1362,6 +1370,8 @@ function saveVillage(){
     stableLevel:+(document.getElementById("f_sta_lvl").value)||0,
     stableTroop:document.getElementById("f_sta_troop").value||null,
     townHallLevel:+(document.getElementById("f_th").value)||0,
+    trainerArtifact:!!document.getElementById("f_trainer").checked,
+    trainable:editingV?editingV.trainable:[],
     synced:editingV?editingV.synced:false, did:editingV?editingV.did:0, updatedAt:Date.now() };
   if(editingV){ const i=state.villages.findIndex(x=>x.id===v.id); state.villages[i]=v; }
   else state.villages.push(v);
@@ -1516,7 +1526,7 @@ function mergeSync(incoming, silent, prune){
         shipCapacityReal:nv.shipCapacityReal||0,
         troopVillage:false, troopPriority:1,
         barracksLevel:nv.barracksLevel||0, stableLevel:nv.stableLevel||0, townHallLevel:nv.townHallLevel||0,
-        barracksTroop:null, stableTroop:null, trainable:nv.trainable||[],
+        barracksTroop:null, stableTroop:null, trainable:nv.trainable||[], trainerArtifact:false,
         synced:!!nv.synced, updatedAt:nv.updatedAt||Date.now() });
       added++;
     }
