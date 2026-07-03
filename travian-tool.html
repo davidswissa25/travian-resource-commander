@@ -1698,6 +1698,12 @@ function renderAll(){
 }
 renderAll();
 setInterval(renderAll,30000);
+// Esc = cancel / go back: close the top-most open dialog (village / route / paste overlay).
+document.addEventListener("keydown",e=>{
+  if(e.key!=="Escape") return;
+  const open=[...document.querySelectorAll(".overlay.show")].pop();
+  if(open){ e.preventDefault(); open.classList.remove("show"); }
+});
 </script>
 </body>
 </html>
