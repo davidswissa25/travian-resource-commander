@@ -691,7 +691,24 @@ function renderUnified(plan){
   const ioTable = ioIds.length ? `<div style="margin-bottom:16px"><b>Per-village flow /h</b> <span class="note" style="margin:0">&mdash; <span style="color:var(--ok)">+ in</span> / <span style="color:var(--bad)">&minus; out</span> per resource</span>
     <table style="margin-top:6px"><thead><tr><th>Village</th><th class="num">Lumber</th><th class="num">Clay</th><th class="num">Iron</th><th class="num">Crop</th></tr></thead><tbody>
     ${ioIds.map(id=>`<tr><td>${esc(vName(id))}</td>${ioCell(io[id])}</tr>`).join('')}</tbody></table></div>` : '';
-  let html=ioTable+`<table><thead><tr><th>To</th><th class="num">Lumber</th><th class="num">Clay</th><th class="num">Iron</th><th class="num">Crop</th><th class="num">Every</th><th class="num">Carriers</th><th>Purpose</th><th></th></tr></thead><tbody>`;
+  // Summary of what this plan actually delivers to troop-making villages (incoming /h vs 24/7 training need)
+  const troopVils=state.villages.filter(v=>v.troopVillage).sort((a,b)=>(a.troopPriority||1)-(b.troopPriority||1));
+  let troopTable='';
+  if(troopVils.length){
+    const tot={lumber:0,clay:0,iron:0,crop:0};
+    const rows=troopVils.map(v=>{
+      const inn=(io[v.id]&&io[v.id].in)||{lumber:0,clay:0,iron:0,crop:0}, need=troopNeedsPerHour(v);
+      RES.forEach(k=>tot[k]+=(inn[k]||0));
+      const lci=['lumber','clay','iron'].map(k=>{ const got=inn[k]||0, req=need[k]||0;
+        const col=req<1?'ok':(got>=req-0.5?'ok':(got>0?'warn':'bad'));
+        return `<td class="num" style="color:var(--${col})">${fmt(got)}${req>=1?' <span style="color:var(--faint)">/ '+fmt(req)+'</span>':''}</td>`; }).join('');
+      return `<tr><td>#${v.troopPriority||1} ${esc(v.name)}</td>${lci}<td class="num" style="color:var(--crop)">${fmt(inn.crop||0)}</td></tr>`;
+    }).join('');
+    troopTable=`<div style="margin-bottom:16px"><b>&#9876; Supply reaching troop villages /h</b> <span class="note" style="margin:0">&mdash; incoming <span style="color:var(--faint)">/ 24&#8260;7 training need</span></span>
+      <table style="margin-top:6px"><thead><tr><th>Troop village</th><th class="num">Lumber</th><th class="num">Clay</th><th class="num">Iron</th><th class="num">Crop</th></tr></thead><tbody>
+      ${rows}<tr style="font-weight:650"><td>Total in</td><td class="num" style="color:var(--lumber)">${fmt(tot.lumber)}</td><td class="num" style="color:var(--clay)">${fmt(tot.clay)}</td><td class="num" style="color:var(--iron)">${fmt(tot.iron)}</td><td class="num" style="color:var(--crop)">${fmt(tot.crop)}</td></tr></tbody></table></div>`;
+  }
+  let html=troopTable+ioTable+`<table><thead><tr><th>To</th><th class="num">Lumber</th><th class="num">Clay</th><th class="num">Iron</th><th class="num">Crop</th><th class="num">Every</th><th class="num">Carriers</th><th>Purpose</th><th></th></tr></thead><tbody>`;
   Object.keys(bySrc).sort((a,b)=>String(vName(a)).localeCompare(String(vName(b)),undefined,{numeric:true})).forEach(src=>{
     const list=bySrc[src];
     html+=`<tr><td colspan="9" style="background:var(--panel2);font-weight:650">&#128666; ${esc(vName(src))} &mdash; ${list.length} route${list.length>1?'s':''}</td></tr>`;
