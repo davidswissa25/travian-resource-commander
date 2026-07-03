@@ -340,12 +340,12 @@ function celebrationNeedsPerHour(v){
   RES.forEach(k=>out[k]=(c[k]||0)/dur);
   return out;
 }
-const BUILD_BUFFER = 1000; // lumber/clay/iron per hour to leave in a village that is still building
-// Resources a village should keep for itself (not donate / not be drained): its 24/7 celebration
-// cost plus, if still building, an extra BUILD_BUFFER of lumber/clay/iron per hour.
+// Resources/h a village keeps for itself before donating: its 24/7 celebration cost, plus - only
+// if it is Still building - the Build buffer (optMargin) of every resource. Non-building villages
+// keep only their celebration reserve (celebration crop is already in consumption).
 function keepReserve(v){
-  const c=celebrationNeedsPerHour(v), b=v.stillBuilding?BUILD_BUFFER:0;
-  return {lumber:(c.lumber||0)+b, clay:(c.clay||0)+b, iron:(c.iron||0)+b, crop:c.crop||0};
+  const c=celebrationNeedsPerHour(v), b=v.stillBuilding?(optMargin||0):0;
+  return {lumber:(c.lumber||0)+b, clay:(c.clay||0)+b, iron:(c.iron||0)+b, crop:b};
 }
 const fmt = n => Math.round(n).toLocaleString();
 const signed = n => (n>=0?"+":"") + fmt(n);
@@ -355,7 +355,7 @@ let state = activeProfile();
 let tab = "dash";
 let editingV = null, editingR = null;
 let optTroopRows = [];
-let optMargin = 50, optMode = "crop", optMinRoute = 200;
+let optMargin = 1000, optMode = "crop", optMinRoute = 200; // optMargin = per-hour reserve kept in still-building villages
 let optFromScratch = true; // plan a full route set ignoring existing routes (not incremental on top)
 let pasteResults = [];
 let balancePer = 1; // Balance-analysis display window in hours: 1 = per hour, 24 = per day
@@ -613,7 +613,7 @@ function vcard(v,flows){
     <div class="bars">${bar("lumber","Lmbr")}${bar("clay","Clay")}${bar("iron","Iron")}${bar("crop","Crop")}</div>
     <div class="vmeta"><span>Net crop: <span class="netcrop" style="color:var(--${net>=0?'ok':'bad'})">${signed(net)}/h</span>${v.synced?'<span class="synced">synced</span>':''}</span><span>Upkeep: ${fmt(consumption(v))}/h</span></div>
     ${troopInfo}${celebInfo}
-    <div class="vactions"><button class="sm${v.troopVillage?' primary':''}" onclick="toggleTroopVillage('${v.id}')" title="${v.troopVillage?'Remove troop-village flag':'Mark as troop-making village'}">&#9876;${v.troopVillage?' Troops':''}</button><button class="sm${v.stillBuilding?' primary':''}" onclick="toggleStillBuilding('${v.id}')" title="${v.stillBuilding?'Done building — stop reserving':'Still building — keep an extra '+fmt(BUILD_BUFFER)+'/h lumber/clay/iron here'}">&#128679;${v.stillBuilding?' Building':''}</button><button class="sm" onclick="openVillage('${v.id}')">Edit</button><button class="sm danger" onclick="delVillage('${v.id}')">Delete</button></div>
+    <div class="vactions"><button class="sm${v.troopVillage?' primary':''}" onclick="toggleTroopVillage('${v.id}')" title="${v.troopVillage?'Remove troop-village flag':'Mark as troop-making village'}">&#9876;${v.troopVillage?' Troops':''}</button><button class="sm${v.stillBuilding?' primary':''}" onclick="toggleStillBuilding('${v.id}')" title="${v.stillBuilding?'Done building — stop reserving':'Still building — keep the Build buffer ('+fmt(optMargin)+'/h) of each resource here'}">&#128679;${v.stillBuilding?' Building':''}</button><button class="sm" onclick="openVillage('${v.id}')">Edit</button><button class="sm danger" onclick="delVillage('${v.id}')">Delete</button></div>
   </div>`;
 }
 
@@ -662,7 +662,8 @@ function buildAutoPlan(mode){
     });
   });
   routes.forEach(r=>{ r.resources={}; RES.forEach(k=>r.resources[k]=Math.round(r.flow[k]*r.interval)); r.tags=[...r.tags]; });
-  routes=routes.filter(r=>RES.some(k=>r.resources[k]>=1));
+  // Min route /h: drop any (merged) route whose total hourly flow is below the threshold.
+  routes=routes.filter(r=>{ const flowH=RES.reduce((s,k)=>s+(r.flow[k]||0),0); return flowH>=Math.max(1,optMinRoute) && RES.some(k=>r.resources[k]>=1); });
   const bySrc={}; routes.forEach(r=>(bySrc[r.from]=bySrc[r.from]||[]).push(r));
   Object.values(bySrc).forEach(list=>list.forEach((r,i)=>r.offsetHours=+((r.interval*i/Math.max(1,list.length)).toFixed(3))));
   // summary
@@ -724,11 +725,10 @@ function renderOptimizer(){
           <option value="crop" ${optMode==='crop'?'selected':''}>Crop only (anti-starvation)</option>
           <option value="all" ${optMode==='all'?'selected':''}>All-in-one (crop + troops + celebrations + overflow)</option>
         </select></label>
-      <label title="Crop/h to leave as a buffer in each surplus village before it donates">Keep buffer /h: <input type="number" value="${optMargin}" style="width:64px" onchange="optMargin=+this.value;renderOptimizer()"></label>
-      <label title="Smallest route worth creating - fewer, larger routes">Min route /h: <input type="number" value="${optMinRoute}" style="width:64px" onchange="optMinRoute=+this.value;renderOptimizer()"></label>
+      <label title="Per hour of each resource to keep in a Still-building village before it donates (0 elsewhere)">Build buffer /h: <input type="number" value="${optMargin}" style="width:64px" onchange="optMargin=+this.value;renderOptimizer()"></label>
+      <label title="Smallest route worth creating - routes below this hourly flow are dropped">Min route /h: <input type="number" value="${optMinRoute}" style="width:64px" onchange="optMinRoute=+this.value;renderOptimizer()"></label>
       <label title="Auto-detected from the server name (e.g. x2)">Server speed: <b style="color:var(--accent);margin-left:4px">&times;${state.serverSpeed||1}</b></label>
       <label title="Alliance commerce bonus % to merchant capacity">Alliance trade %: <input type="number" value="${state.allianceBonus||0}" style="width:60px" onchange="state.allianceBonus=+this.value||0;save();renderAll()"></label>
-      <label title="Merchants per village if not set individually (= marketplace level)">Default market lvl: <input type="number" value="${state.defaultMarket||0}" style="width:56px" onchange="state.defaultMarket=+this.value||0;save();renderAll()"></label>
       <label title="Great Trainer artifact: all villages train in 3/4 of the time (raises troop-village supply needs)"><input type="checkbox" ${state.greatTrainer?'checked':''} onchange="state.greatTrainer=this.checked;save();renderAll()"> Great Trainer</label>
       <label title="Plan a complete route set ignoring your existing routes (Apply replaces the optimizer's previous routes). Uncheck to plan only the gap on top of what you already run."><input type="checkbox" ${optFromScratch?'checked':''} onchange="optFromScratch=this.checked;renderOptimizer()"> From scratch</label>
       <label>Server URL: <input type="text" value="${esc(state.serverUrl||'')}" placeholder="https://rof.x2.europe.travian.com" style="width:220px" onchange="state.serverUrl=this.value.trim().replace(/\/+$/,'');detectServerSpeed(state.serverUrl);renderAll()"></label>
@@ -763,7 +763,7 @@ function optimize(){
   const carr={}; state.villages.forEach(v=>{ const c=committed[v.id]||{merchants:0,ships:0};
     carr[v.id]={merch:Math.max(0,maxMerchants(v)-c.merchants), ship:Math.max(0,maxShips(v)-c.ships)}; });
   const wrap=id=>({v:state.villages.find(x=>x.id===id), merchAvail:carr[id].merch, shipAvail:carr[id].ship});
-  let donors=data.filter(d=>d.net-optMargin>0).map(d=>({v:d.v, avail:d.net-optMargin}));
+  let donors=data.map(d=>({v:d.v, avail:d.net-keepReserve(d.v).crop})).filter(d=>d.avail>0); // reserve = build buffer only in still-building villages
   let receivers=data.filter(d=>d.net<0).map(d=>({...d,need:-d.net,eta:d.crop/(-d.net)})).sort((a,b)=>a.eta-b.eta);
   const hubs=data.filter(d=>d.net>=0).map(d=>({v:d.v})); // any non-draining village may forward crop on (1 hop)
   const balanced=receivers.length===0, routes=[], unmet=[];
@@ -1111,7 +1111,7 @@ function optimizeOverflow(cropPlan, troopPlan){
       const p=proj[v.id], net=p.net[k], cap=p.cap[k]||0, cur=p.cur[k];
       const cel=keepReserve(v)[k]||0;                                 // reserve celebration need + build buffer
       const eta = net>0.5 && cap>0 ? (cap-cur)/net : Infinity;
-      const give = (cap>0 && net-cel>optMargin && (cur>=cap || eta<OVERFLOW_HORIZON)) ? net-cel-optMargin : 0;
+      const give = (cap>0 && net-cel>0 && (cur>=cap || eta<OVERFLOW_HORIZON)) ? net-cel : 0;
       return {v,give,fill:cap>0?cur/cap:0};
     }).filter(d=>d.give>0).sort((a,b)=>b.fill-a.fill);
     // Receivers: non-troop villages with real headroom, emptiest first.
@@ -1148,7 +1148,7 @@ function optimizeOverflow(cropPlan, troopPlan){
   Object.values(bySrc).forEach(list=>list.forEach((r,i)=>r.offsetHours=+((r.interval*i/Math.max(1,list.length)).toFixed(3))));
   let summary;
   if(!routes.length){
-    summary = !anyDonor ? `No village is overflowing on lumber/clay/iron within ${OVERFLOW_HORIZON}h above the keep buffer (${fmt(optMargin)}/h). Nothing to balance.`
+    summary = !anyDonor ? `No village is overflowing on lumber/clay/iron within ${OVERFLOW_HORIZON}h. Nothing to balance.`
             : !anyRecv  ? "Villages are filling up but none has spare warehouse room to receive the surplus."
             : `Overflow exists but is too far/small per donor to form a route above Min route /h (${fmt(optMinRoute)}). Lower it to use it.`;
   } else {
@@ -1269,7 +1269,7 @@ function openVillage(id){
     <div class="field full"><label>Village name</label><input id="f_name" value="${esc(v.name||'')}" placeholder="Capital"></div>
     <div class="field"><label>Tribe</label><select id="f_tribe" onchange="syncMerchant()">${Object.keys(TRIBES).map(x=>`<option ${v.tribe===x?'selected':''}>${x}</option>`).join("")}</select></div>
     <div class="field"><label>Coordinates X | Y</label><div style="display:flex;gap:6px"><input type="number" id="f_x" value="${v.x==null?'':v.x}" placeholder="X" style="width:50%"><input type="number" id="f_y" value="${v.y==null?'':v.y}" placeholder="Y" style="width:50%"></div></div>
-    <div class="field full"><label style="display:flex;align-items:center;gap:8px;cursor:pointer"><input type="checkbox" id="f_building" ${v.stillBuilding?'checked':''}> <span>Still building &mdash; keep an extra ${fmt(BUILD_BUFFER)}/h lumber, clay &amp; iron here (not shipped away)</span></label></div>
+    <div class="field full"><label style="display:flex;align-items:center;gap:8px;cursor:pointer"><input type="checkbox" id="f_building" ${v.stillBuilding?'checked':''}> <span>Still building &mdash; keep the Build buffer (${fmt(optMargin)}/h) of each resource here (not shipped away)</span></label></div>
     <div class="field full"><label style="display:flex;align-items:center;gap:8px;cursor:pointer"><input type="checkbox" id="f_troop" ${v.troopVillage?'checked':''} onchange="document.getElementById('troopConfig').style.display=this.checked?'contents':'none'"> <span>Troop-making village &mdash; receives resources from surplus villages to sustain 24/7 training</span></label></div>
     <div id="troopConfig" style="display:${v.troopVillage?'contents':'none'}">
       <div class="sect">Troop Production &mdash; 24/7 barracks &amp; stable supply</div>
