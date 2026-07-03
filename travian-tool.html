@@ -654,6 +654,7 @@ function buildAutoPlan(mode){
       const cap=(k==='crop'?(v.granary&&v.granary.capacity):(v.warehouse&&v.warehouse.capacity))||0;
       const cur=(k==='crop'?(v.granary&&v.granary.crop):(v.warehouse&&v.warehouse[k]))||0;
       let base=(v.prod&&v.prod[k])||0; if(k==='crop') base-=consumption(v); // own rate before this plan
+      if(k!=='crop' && v.troopVillage) base-=troopNeedsPerHour(v)[k]||0; // troop training consumes l/c/i, freeing room for inflow
       base += ((f0.inn[v.id]&&f0.inn[v.id][k])||0) - ((f0.out[v.id]&&f0.out[v.id][k])||0);
       routes.forEach(r=>{ if(r.from===v.id) base-=r.flow[k]; }); // subtract this plan's own outflow (relay hubs forward what they receive)
       // crop: never push net above 0 (keep granary from filling); l/c/i: allow filling no faster than the horizon
@@ -680,7 +681,17 @@ function renderUnified(plan){
   const vName=id=>{const v=state.villages.find(x=>x.id===id);return v?v.name:'?';};
   const bySrc={}; plan.routes.forEach(r=>(bySrc[r.from]=bySrc[r.from]||[]).push(r));
   const cell=(val,col)=>`<td class="num" style="color:var(--${col})">${val>=1?fmt(val):'<span style="color:var(--faint)">&mdash;</span>'}</td>`;
-  let html=`<table><thead><tr><th>To</th><th class="num">Lumber</th><th class="num">Clay</th><th class="num">Iron</th><th class="num">Crop</th><th class="num">Every</th><th class="num">Carriers</th><th>Purpose</th><th></th></tr></thead><tbody>`;
+  // per-village hourly in/out per resource across the whole plan
+  const io={}, ioOf=id=>io[id]||(io[id]={in:{lumber:0,clay:0,iron:0,crop:0},out:{lumber:0,clay:0,iron:0,crop:0}});
+  plan.routes.forEach(r=>RES.forEach(k=>{ const f=r.flow[k]||0; if(f>0){ ioOf(r.from).out[k]+=f; ioOf(r.to).in[k]+=f; } }));
+  const ioIds=Object.keys(io).sort((a,b)=>String(vName(a)).localeCompare(String(vName(b)),undefined,{numeric:true}));
+  const ioCell=x=>RES.map(k=>{ const i=x.in[k]||0, o=x.out[k]||0; if(i<1&&o<1) return '<td class="num"><span style="color:var(--faint)">&mdash;</span></td>';
+    const p=[]; if(i>=1) p.push('<span style="color:var(--ok)">+'+fmt(i)+'</span>'); if(o>=1) p.push('<span style="color:var(--bad)">&minus;'+fmt(o)+'</span>');
+    return '<td class="num">'+p.join('<br>')+'</td>'; }).join('');
+  const ioTable = ioIds.length ? `<div style="margin-bottom:16px"><b>Per-village flow /h</b> <span class="note" style="margin:0">&mdash; <span style="color:var(--ok)">+ in</span> / <span style="color:var(--bad)">&minus; out</span> per resource</span>
+    <table style="margin-top:6px"><thead><tr><th>Village</th><th class="num">Lumber</th><th class="num">Clay</th><th class="num">Iron</th><th class="num">Crop</th></tr></thead><tbody>
+    ${ioIds.map(id=>`<tr><td>${esc(vName(id))}</td>${ioCell(io[id])}</tr>`).join('')}</tbody></table></div>` : '';
+  let html=ioTable+`<table><thead><tr><th>To</th><th class="num">Lumber</th><th class="num">Clay</th><th class="num">Iron</th><th class="num">Crop</th><th class="num">Every</th><th class="num">Carriers</th><th>Purpose</th><th></th></tr></thead><tbody>`;
   Object.keys(bySrc).sort((a,b)=>String(vName(a)).localeCompare(String(vName(b)),undefined,{numeric:true})).forEach(src=>{
     const list=bySrc[src];
     html+=`<tr><td colspan="9" style="background:var(--panel2);font-weight:650">&#128666; ${esc(vName(src))} &mdash; ${list.length} route${list.length>1?'s':''}</td></tr>`;
@@ -1109,31 +1120,32 @@ function optimizeOverflow(cropPlan, troopPlan){
     const c=committed[v.id]||{merchants:0,ships:0}, rs=reserved[v.id]||{merchants:0,ships:0};
     carr[v.id]=Math.max(0,maxMerchants(v)-c.merchants-rs.merchants);
   });
-  const routes=[]; let anyDonor=false, anyRecv=false;
+  // l/c/i per hour each donor already sends via the troop-supply plan, so we don't double-spend surplus.
+  const usedByTroop={};
+  ((troopPlan&&troopPlan.routes)||[]).forEach(r=>{ const e=usedByTroop[r.from]||(usedByTroop[r.from]={lumber:0,clay:0,iron:0}); nonCrop.forEach(k=>e[k]+=(r.resources[k]||0)/(r.interval||1)); });
+  const troopVils=state.villages.filter(v=>v.troopVillage).sort((a,b)=>(a.troopPriority||1)-(b.troopPriority||1));
+  const routes=[]; let anyDonor=false; const anyRecv=troopVils.length>0;
   nonCrop.forEach(k=>{
-    // Donors: filling/overflowing on k, with surplus above the keep buffer.
-    const donors=state.villages.map(v=>{
-      const p=proj[v.id], net=p.net[k], cap=p.cap[k]||0, cur=p.cur[k];
-      const cel=keepReserve(v)[k]||0;                                 // reserve celebration need + build buffer
-      const eta = net>0.5 && cap>0 ? (cap-cur)/net : Infinity;
-      const give = (cap>0 && net-cel>0 && (cur>=cap || eta<OVERFLOW_HORIZON)) ? net-cel : 0;
-      return {v,give,fill:cap>0?cur/cap:0};
-    }).filter(d=>d.give>0).sort((a,b)=>b.fill-a.fill);
-    // Receivers: non-troop villages with real headroom, emptiest first.
-    const receivers=state.villages.filter(v=>!v.troopVillage).map(v=>{
-      const p=proj[v.id], cap=p.cap[k]||0, cur=p.cur[k];
-      return {v,room:Math.max(0,cap-cur),fill:cap>0?cur/cap:1};
-    }).filter(r=>r.room>optMinRoute).sort((a,b)=>a.fill-b.fill);
+    // Donors: any NON-troop village with production surplus above its own reserve (celebration + build
+    // buffer) and beyond what it already sends to cover troop needs. All of it is forwarded to troops.
+    const donors=state.villages.filter(v=>!v.troopVillage).map(v=>{
+      const net=proj[v.id].net[k], res=keepReserve(v)[k]||0, ut=(usedByTroop[v.id]&&usedByTroop[v.id][k])||0;
+      return {v, give:Math.max(0, net-res-ut)};
+    }).filter(d=>d.give>0.5);
+    // Receivers: troop-making villages in priority order (their warehouse room, refreshed by training).
+    const receivers=troopVils.map(v=>{ const p=proj[v.id], cap=p.cap[k]||0, cur=p.cur[k];
+      const room=Math.max(0,cap-cur)+(troopNeedsPerHour(v)[k]||0)*OVERFLOW_HORIZON; // training consumes over time -> extra effective room
+      return {v, room};
+    }).filter(r=>r.room>optMinRoute);
     if(donors.length) anyDonor=true;
-    if(receivers.length) anyRecv=true;
     donors.forEach(d=>{
       let give=d.give;
       for(const r of receivers){
         if(give<optMinRoute || carr[d.v.id]<=0) break;
-        if(r.v.id===d.v.id || r.fill>=d.fill-0.05 || r.room<optMinRoute) continue;
+        if(r.v.id===d.v.id || r.room<optMinRoute) continue;
         const dst=dist(d.v,r.v), Tm=(2*dst)/effSpeed(d.v);
         const I=Math.max(1,Math.min(24,Math.round(Tm)||1)), waves=Math.ceil(Tm/I), cap=effCap(d.v);
-        const flow=Math.min(give, r.room/I); // never exceed receiver headroom in one interval
+        const flow=Math.min(give, r.room/I);
         if(flow<optMinRoute) continue;
         let perSend=Math.round(flow*I);
         let carriers=Math.max(1,Math.ceil(perSend/cap))*waves;
@@ -1143,7 +1155,7 @@ function optimizeOverflow(cropPlan, troopPlan){
         routes.push({from:d.v.id,to:r.v.id,fromName:d.v.name,toName:r.v.name,res:k,
           perSend,interval:I,distance:Math.round(dst),merchants:carriers,perHour:ph,
           resources:{lumber:k==='lumber'?perSend:0,clay:k==='clay'?perSend:0,iron:k==='iron'?perSend:0,crop:0},
-          impact:'relieve '+k});
+          impact:'to troops'});
         give-=ph; carr[d.v.id]-=carriers; r.room-=perSend;
       }
     });
@@ -1153,11 +1165,11 @@ function optimizeOverflow(cropPlan, troopPlan){
   Object.values(bySrc).forEach(list=>list.forEach((r,i)=>r.offsetHours=+((r.interval*i/Math.max(1,list.length)).toFixed(3))));
   let summary;
   if(!routes.length){
-    summary = !anyDonor ? `No village is overflowing on lumber/clay/iron within ${OVERFLOW_HORIZON}h. Nothing to balance.`
-            : !anyRecv  ? "Villages are filling up but none has spare warehouse room to receive the surplus."
-            : `Overflow exists but is too far/small per donor to form a route above Min route /h (${fmt(optMinRoute)}). Lower it to use it.`;
+    summary = !anyRecv  ? "No troop-making villages to forward surplus to. Mark a village with the &#9876; button."
+            : !anyDonor ? "No village has spare lumber/clay/iron to forward after its own reserve."
+            : `Surplus exists but is too far/small per donor to form a route above Min route /h (${fmt(optMinRoute)}). Lower it to use it.`;
   } else {
-    summary = `${routes.length} overflow route${routes.length>1?'s':''} proposed: moving surplus lumber/clay/iron from filling warehouses to the emptiest villages.`;
+    summary = `${routes.length} route${routes.length>1?'s':''} forwarding surplus lumber/clay/iron to your troop-making villages.`;
   }
   return {routes,summary};
 }
