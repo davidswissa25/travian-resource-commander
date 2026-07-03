@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Travian Commander - Pull & Sync bridge
 // @namespace    travian-commander
-// @version      1.6.0
+// @version      1.6.1
 // @description  One-click: a "Pull & Sync" button on the game retrieves every village's tribe, marketplace level, Trade Office level, barracks & stable levels, production, net crop, current resource storages (warehouse/granary stock + capacity), computed merchant capacity and active recurring trade routes, then pushes it straight into the Resource Commander tool (open in another tab) - no console, no file import. Read-only on the game.
 // @author       you
 // @match        *://*.travian.com/*
@@ -106,25 +106,32 @@
       return null;
     }
     // The marketplace "Trade routes" tab (t=3) ships the full route graph as JSON inside
-    // Travian.React.TradeRoutes.render({viewData:{...tradeRoutes:[...]}}). Each destination
-    // holds a list of scheduled sends that tile a 24h cycle; we sum the ENABLED ones to a
-    // daily total and model it as one route at a 24h interval (hourly flow = daily / 24).
+    // Travian.React.TradeRoutes.render({viewData:{...tradeRoutes:[...]}}). Each destination has a
+    // list of scheduled sends. We take the PER-SEND amount and derive the interval from the actual
+    // gap between departure times, so hourly flow = perSend / interval - correct no matter how many
+    // sends the list spans (the old "sum all / 24h" was wrong when they didn't tile exactly 24h).
     function extractTradeRoutes(html) {
       const raw = sliceArray(html, html.indexOf('"tradeRoutes":'));
       if (!raw) return [];
       let arr; try { arr = JSON.parse(raw); } catch (e) { return []; }
-      const out = [];
+      const out = [], keys = ['lumber', 'clay', 'iron', 'crop'];
       arr.forEach(tr => {
         if (!tr || !tr.from || !tr.to || !Array.isArray(tr.routes)) return;
-        const tot = { lumber: 0, clay: 0, iron: 0, crop: 0 }; let merch = 0, active = false;
-        tr.routes.forEach(r => {
-          if (!r || !r.enabled) return;                 // ACTIVE sends only
-          active = true; const cr = r.carriedResources || {};
-          tot.lumber += cr.lumber || 0; tot.clay += cr.clay || 0; tot.iron += cr.iron || 0; tot.crop += cr.crop || 0;
-          if ((r.merchants || 0) > merch) merch = r.merchants || 0;
-        });
-        if (!active || !(tot.lumber || tot.clay || tot.iron || tot.crop)) return;
-        out.push({ fromDid: tr.from.id, toDid: tr.to.id, toName: tr.to.name, resources: tot, intervalHours: 24, merchants: merch });
+        const sends = tr.routes.filter(r => r && r.enabled).sort((a, b) => (a.departureAt || 0) - (b.departureAt || 0));
+        if (!sends.length) return;
+        // per-send resources = average across the day's sends (normally all identical), and merchants
+        const per = { lumber: 0, clay: 0, iron: 0, crop: 0 }; let merch = 0;
+        sends.forEach(r => { const cr = r.carriedResources || {}; keys.forEach(k => per[k] += cr[k] || 0); if ((r.merchants || 0) > merch) merch = r.merchants || 0; });
+        keys.forEach(k => per[k] = Math.round(per[k] / sends.length));
+        if (!keys.some(k => per[k])) return;
+        // interval = median gap between consecutive departures (seconds -> whole hours); 1 send -> daily
+        let intervalHours = 24;
+        if (sends.length >= 2) {
+          const gaps = []; for (let i = 1; i < sends.length; i++) gaps.push((sends[i].departureAt || 0) - (sends[i - 1].departureAt || 0));
+          gaps.sort((a, b) => a - b); const med = gaps[Math.floor(gaps.length / 2)];
+          if (med > 0) intervalHours = Math.max(1, Math.min(24, Math.round(med / 3600)));
+        }
+        out.push({ fromDid: tr.from.id, toDid: tr.to.id, toName: tr.to.name, resources: per, intervalHours: intervalHours, merchants: merch });
       });
       return out;
     }
