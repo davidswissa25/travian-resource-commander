@@ -729,14 +729,14 @@ function renderUnified(plan){
     list.forEach(r=>{
       const carriers=`${r.merchants}&#128722;`+(r.ships?` + ${r.ships}&#9973;`:'');
       const fromV=state.villages.find(v=>v.id===r.from), toV=state.villages.find(v=>v.id===r.to);
-      const sl=sendLinkRes(fromV,toV,r.resources), rl=routeLink(fromV);
+      const rl=routeLink(fromV);
       html+=`<tr>
         <td>&rarr; ${esc(r.toName||vName(r.to))}${r.relay?' <span class="troop-badge">hub</span>':''}</td>
         ${cell(r.resources.lumber,'lumber')}${cell(r.resources.clay,'clay')}${cell(r.resources.iron,'iron')}${cell(r.resources.crop,'crop')}
         <td class="num">${r.interval}h${r.offsetHours?(' @'+hhmm(r.offsetHours)):''}</td>
         <td class="num" title="merchants + trade ships">${carriers}</td>
         <td style="font-size:11px;color:var(--dim)">${r.tags.join(' + ')}</td>
-        <td style="white-space:nowrap">${rl?'<a href="'+rl+'" target="_blank" style="color:var(--accent)" title="Open this village&rsquo;s Trade routes tab to create the recurring route">+Route&#8599;</a>':''}${sl?' <a href="'+sl+'" target="_blank" style="color:var(--dim)" title="One-off send, pre-filled">Send&#8599;</a>':''}</td>
+        <td style="white-space:nowrap">${rl?'<a href="'+rl+'" target="_blank" style="color:var(--accent)" title="Open this village&rsquo;s Trade routes tab to create the recurring route">+Route&#8599;</a>':''}</td>
       </tr>`;
     });
   });
