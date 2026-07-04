@@ -461,7 +461,9 @@ function esc(s){ return String(s==null?"":s).replace(/[&<>"]/g,c=>({"&":"&amp;",
 
 /* ---- math ---- */
 function troopUpkeep(v){ return (v.troops||[]).reduce((s,t)=>s+(t.count||0)*(t.upkeep||0),0); }
-function consumption(v){ return (v.baseConsumption||0)+troopUpkeep(v)+celebrationNeedsPerHour(v).crop; }
+// troopNeedsPerHour(v).crop = crop cost of training the configured barracks/stable/workshop unit(s),
+// on top of celebration crop and the upkeep of troops already in the field (troopUpkeep).
+function consumption(v){ return (v.baseConsumption||0)+troopUpkeep(v)+celebrationNeedsPerHour(v).crop+troopNeedsPerHour(v).crop; }
 function routeFlows(){
   const inn={}, out={};
   state.villages.forEach(v=>{ inn[v.id]={lumber:0,clay:0,iron:0,crop:0}; out[v.id]={lumber:0,clay:0,iron:0,crop:0}; });
