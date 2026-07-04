@@ -711,11 +711,18 @@ function renderUnified(plan){
       const lci=['lumber','clay','iron'].map(k=>{ const got=inn[k]||0, req=need[k]||0;
         const col=req<1?'ok':(got>=req-0.5?'ok':(got>0?'warn':'bad'));
         return `<td class="num" style="color:var(--${col})">${fmt(got)}${req>=1?' <span style="color:var(--faint)">/ '+fmt(req)+'</span>':''}</td>`; }).join('');
-      return `<tr><td>#${v.troopPriority||1} ${esc(v.name)}</td>${lci}<td class="num" style="color:var(--crop)">${fmt(inn.crop||0)}</td></tr>`;
+      // warehouse fill time = soonest l/c/i to hit cap, at net = own production + incoming - training use
+      const cap=(v.warehouse&&v.warehouse.capacity)||0; let fill=Infinity;
+      ['lumber','clay','iron'].forEach(k=>{ const cur=(v.warehouse&&v.warehouse[k])||0;
+        const netk=((v.prod&&v.prod[k])||0)+(inn[k]||0)-(need[k]||0);
+        if(netk>0.5 && cap>0){ const e=(cap-cur)/netk; if(e<fill) fill=e; } });
+      const fillCell = fill===Infinity ? '<span style="color:var(--ok)">stable</span>'
+        : `<span style="color:var(--${fill<WAREHOUSE_FILL_H?'bad':fill<24?'warn':'ok'})">${hms(fill)}</span>`;
+      return `<tr><td>#${v.troopPriority||1} ${esc(v.name)}</td>${lci}<td class="num" style="color:var(--crop)">${fmt(inn.crop||0)}</td><td class="num">${fillCell}</td></tr>`;
     }).join('');
-    troopTable=`<div style="margin-bottom:16px"><b>&#9876; Supply reaching troop villages /h</b> <span class="note" style="margin:0">&mdash; incoming <span style="color:var(--faint)">/ 24&#8260;7 training need</span></span>
-      <table style="margin-top:6px"><thead><tr><th>Troop village</th><th class="num">Lumber</th><th class="num">Clay</th><th class="num">Iron</th><th class="num">Crop</th></tr></thead><tbody>
-      ${rows}<tr style="font-weight:650"><td>Total in</td><td class="num" style="color:var(--lumber)">${fmt(tot.lumber)}</td><td class="num" style="color:var(--clay)">${fmt(tot.clay)}</td><td class="num" style="color:var(--iron)">${fmt(tot.iron)}</td><td class="num" style="color:var(--crop)">${fmt(tot.crop)}</td></tr></tbody></table></div>`;
+    troopTable=`<div style="margin-bottom:16px"><b>&#9876; Supply reaching troop villages /h</b> <span class="note" style="margin:0">&mdash; incoming <span style="color:var(--faint)">/ 24&#8260;7 training need</span>; warehouse fill = soonest of L/C/I</span>
+      <table style="margin-top:6px"><thead><tr><th>Troop village</th><th class="num">Lumber</th><th class="num">Clay</th><th class="num">Iron</th><th class="num">Crop</th><th class="num">Warehouse fills</th></tr></thead><tbody>
+      ${rows}<tr style="font-weight:650"><td>Total in</td><td class="num" style="color:var(--lumber)">${fmt(tot.lumber)}</td><td class="num" style="color:var(--clay)">${fmt(tot.clay)}</td><td class="num" style="color:var(--iron)">${fmt(tot.iron)}</td><td class="num" style="color:var(--crop)">${fmt(tot.crop)}</td><td></td></tr></tbody></table></div>`;
   }
   let html=troopTable+ioTable+`<table><thead><tr><th>To</th><th class="num">Lumber</th><th class="num">Clay</th><th class="num">Iron</th><th class="num">Crop</th><th class="num">Every</th><th class="num">Carriers</th><th>Purpose</th><th></th></tr></thead><tbody>`;
   Object.keys(bySrc).sort((a,b)=>String(vName(a)).localeCompare(String(vName(b)),undefined,{numeric:true})).forEach(src=>{
