@@ -693,16 +693,9 @@ function renderUnified(plan){
   const vName=id=>{const v=state.villages.find(x=>x.id===id);return v?v.name:'?';};
   const bySrc={}; plan.routes.forEach(r=>(bySrc[r.from]=bySrc[r.from]||[]).push(r));
   const cell=(val,col)=>`<td class="num" style="color:var(--${col})">${val>=1?fmt(val):'<span style="color:var(--faint)">&mdash;</span>'}</td>`;
-  // per-village hourly in/out per resource across the whole plan
+  // per-village incoming per resource (used by the troop-village summary below)
   const io={}, ioOf=id=>io[id]||(io[id]={in:{lumber:0,clay:0,iron:0,crop:0},out:{lumber:0,clay:0,iron:0,crop:0}});
   plan.routes.forEach(r=>RES.forEach(k=>{ const f=r.flow[k]||0; if(f>0){ ioOf(r.from).out[k]+=f; ioOf(r.to).in[k]+=f; } }));
-  const ioIds=Object.keys(io).sort((a,b)=>String(vName(a)).localeCompare(String(vName(b)),undefined,{numeric:true}));
-  const ioCell=x=>RES.map(k=>{ const i=x.in[k]||0, o=x.out[k]||0; if(i<1&&o<1) return '<td class="num"><span style="color:var(--faint)">&mdash;</span></td>';
-    const p=[]; if(i>=1) p.push('<span style="color:var(--ok)">+'+fmt(i)+'</span>'); if(o>=1) p.push('<span style="color:var(--bad)">&minus;'+fmt(o)+'</span>');
-    return '<td class="num">'+p.join('<br>')+'</td>'; }).join('');
-  const ioTable = ioIds.length ? `<div style="margin-bottom:16px"><b>Per-village flow /h</b> <span class="note" style="margin:0">&mdash; <span style="color:var(--ok)">+ in</span> / <span style="color:var(--bad)">&minus; out</span> per resource</span>
-    <table style="margin-top:6px"><thead><tr><th>Village</th><th class="num">Lumber</th><th class="num">Clay</th><th class="num">Iron</th><th class="num">Crop</th></tr></thead><tbody>
-    ${ioIds.map(id=>`<tr><td>${esc(vName(id))}</td>${ioCell(io[id])}</tr>`).join('')}</tbody></table></div>` : '';
   // Summary of what this plan actually delivers to troop-making villages (incoming /h vs 24/7 training need)
   const troopVils=state.villages.filter(v=>v.troopVillage).sort((a,b)=>(a.troopPriority||1)-(b.troopPriority||1));
   let troopTable='';
@@ -727,10 +720,12 @@ function renderUnified(plan){
       <table style="margin-top:6px"><thead><tr><th>Troop village</th><th class="num">Lumber</th><th class="num">Clay</th><th class="num">Iron</th><th class="num">Crop</th><th class="num">Warehouse fills</th></tr></thead><tbody>
       ${rows}<tr style="font-weight:650"><td>Total in</td><td class="num" style="color:var(--lumber)">${fmt(tot.lumber)}</td><td class="num" style="color:var(--clay)">${fmt(tot.clay)}</td><td class="num" style="color:var(--iron)">${fmt(tot.iron)}</td><td class="num" style="color:var(--crop)">${fmt(tot.crop)}</td><td></td></tr></tbody></table></div>`;
   }
-  let html=troopTable+ioTable+`<table><thead><tr><th>To</th><th class="num">Lumber</th><th class="num">Clay</th><th class="num">Iron</th><th class="num">Crop</th><th class="num">Every</th><th class="num">Carriers</th><th>Purpose</th><th></th></tr></thead><tbody>`;
+  let html=troopTable+`<table><thead><tr><th>To</th><th class="num">Lumber</th><th class="num">Clay</th><th class="num">Iron</th><th class="num">Crop</th><th class="num">Every</th><th class="num">Carriers</th><th>Purpose</th><th></th></tr></thead><tbody>`;
   Object.keys(bySrc).sort((a,b)=>String(vName(a)).localeCompare(String(vName(b)),undefined,{numeric:true})).forEach(src=>{
     const list=bySrc[src];
-    html+=`<tr><td colspan="9" style="background:var(--panel2);font-weight:650">&#128666; ${esc(vName(src))} &mdash; ${list.length} route${list.length>1?'s':''}</td></tr>`;
+    const out=(io[src]&&io[src].out)||{lumber:0,clay:0,iron:0,crop:0};
+    const outStr=RES.filter(k=>out[k]>=1).map(k=>`<span style="color:var(--${k})">${fmt(out[k])}</span>`).join(' <span style="color:var(--faint)">&middot;</span> ');
+    html+=`<tr><td colspan="9" style="background:var(--panel2);font-weight:650">&#128666; ${esc(vName(src))} &mdash; ${list.length} route${list.length>1?'s':''} <span style="font-weight:400;font-size:11px;color:var(--dim);margin-left:8px">out /h: ${outStr||'&mdash;'}</span></td></tr>`;
     list.forEach(r=>{
       const carriers=`${r.merchants}&#128722;`+(r.ships?` + ${r.ships}&#9973;`:'');
       const fromV=state.villages.find(v=>v.id===r.from), toV=state.villages.find(v=>v.id===r.to);
