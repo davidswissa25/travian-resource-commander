@@ -378,6 +378,8 @@ function normalizeProfile(p, label){
   if(p.allianceBonus==null) p.allianceBonus=0;
   if(p.defaultMarket==null) p.defaultMarket=0;
   if(p.ignoreBonuses==null) p.ignoreBonuses=false; // ignore temporary/toggleable alliance bonuses in capacity & speed math
+  if(p.ignoreProdBoost==null) p.ignoreProdBoost=false; // plan on base production, ignoring the (temporary) gold/ad production boost
+  if(p.prodBoostPct==null) p.prodBoostPct=25;
   ensureIds(p.villages); // backfill missing/duplicate ids so edit & delete always match
   dedupeAndSort(p);      // remove rename-duplicates (same coords) and order by village number
   return p;
@@ -477,7 +479,7 @@ function routeFlows(){
 }
 function netRates(v, flows){
   const inn=flows.inn[v.id]||{}, out=flows.out[v.id]||{}, n={};
-  RES.forEach(k=>{ let base=(v.prod&&v.prod[k])||0; if(k==="crop") base-=consumption(v);
+  RES.forEach(k=>{ let base=prodBase(v,k); if(k==="crop") base-=consumption(v);
     // A trade route only sends what's available: outgoing shipments can't drive a resource
     // negative (the game sends the max it can). So the floor = own production + incoming,
     // and outgoing is effectively capped there. A village with non-negative own crop can
@@ -504,6 +506,11 @@ function dist(a,b){ const dx=(a.x||0)-(b.x||0),dy=(a.y||0)-(b.y||0); return Math
 // merchantCapacityReal/shipCapacityReal (those were scraped live and may have baked in whatever
 // bonus % was active at sync time), always recomputing from the base formula instead.
 function bonusMult(){ return state.ignoreBonuses ? 1 : (1+((state.allianceBonus||0)/100)); }
+// Base (unboosted) production: the captured production already includes any active production boost
+// (the +25% wood/clay/iron & crop from Gold, or the temporary boost from watching ads), which is
+// NOT permanent. With "Ignore production boost" on, divide it back out so routes are sized on the
+// sustainable base production instead of a boost that can lapse.
+function prodBase(v,k){ const p=(v&&v.prod&&v.prod[k])||0; return state.ignoreProdBoost ? p/(1+((state.prodBoostPct||25)/100)) : p; }
 function effSpeed(v){ return (v.merchantSpeed||16)*(state.serverSpeed||1)*bonusMult(); }
 function effCap(v){
   // Prefer the real per-merchant capacity read from the game (already includes server
@@ -590,10 +597,10 @@ function renderCmd(){
     if(p.net.crop<0){ draining++; const t=p.cur.crop/(-p.net.crop); if(t<soonest){soonest=t;soonestName=v.name;} } });
   const soonStr = soonest===Infinity ? "&mdash;" : hms(soonest);
   const prodTot={lumber:0,clay:0,iron:0,crop:0};
-  state.villages.forEach(v=>RES.forEach(k=>prodTot[k]+=(v.prod&&v.prod[k])||0)); // account-wide gross production /h
+  state.villages.forEach(v=>RES.forEach(k=>prodTot[k]+=prodBase(v,k))); // account-wide production /h (base if "Ignore production boost" is on)
   document.getElementById("cmdbar").innerHTML = `
     <div class="stat"><div class="lbl">Villages</div><div class="val">${state.villages.length}</div><div class="sub">${state.routes.length} active routes</div></div>
-    <div class="stat"><div class="lbl">Production / h</div><div class="val" style="font-size:15px;line-height:1.35">${['lumber','clay','iron','crop'].map(k=>`<span style="color:var(--${k})">${fmt(prodTot[k])}</span>`).join(' <span style="color:var(--faint)">&middot;</span> ')}</div><div class="sub">lumber &middot; clay &middot; iron &middot; crop (all villages)</div></div>
+    <div class="stat"><div class="lbl">Production / h</div><div class="val" style="font-size:15px;line-height:1.35">${['lumber','clay','iron','crop'].map(k=>`<span style="color:var(--${k})">${fmt(prodTot[k])}</span>`).join(' <span style="color:var(--faint)">&middot;</span> ')}</div><div class="sub">lumber &middot; clay &middot; iron &middot; crop (all villages${state.ignoreProdBoost?', base':''})</div></div>
     <div class="stat"><div class="lbl">Account crop / h</div><div class="val ${totalCrop>=0?'good':'bad'}">${signed(totalCrop)}</div><div class="sub">net across all villages</div></div>
     <div class="stat"><div class="lbl">Villages draining</div><div class="val ${draining?'warn':'good'}">${draining}</div><div class="sub">crop deficit right now</div></div>
     <div class="stat"><div class="lbl">Soonest starvation</div><div class="val ${soonest<24?'bad':soonest===Infinity?'good':'warn'}">${soonStr}</div><div class="sub">${esc(soonestName)||'all stable'}</div></div>`;
@@ -688,7 +695,7 @@ function buildAutoPlan(mode){
       const totalIn=inn.reduce((s,r)=>s+r.flow[k],0); if(totalIn<=0) return;
       const cap=(k==='crop'?(v.granary&&v.granary.capacity):(v.warehouse&&v.warehouse.capacity))||0;
       const cur=(k==='crop'?(v.granary&&v.granary.crop):(v.warehouse&&v.warehouse[k]))||0;
-      let base=(v.prod&&v.prod[k])||0; if(k==='crop') base-=consumption(v); // own rate before this plan
+      let base=prodBase(v,k); if(k==='crop') base-=consumption(v); // own rate before this plan
       if(k!=='crop' && v.troopVillage) base-=troopNeedsPerHour(v)[k]||0; // troop training consumes l/c/i, freeing room for inflow
       base += ((f0.inn[v.id]&&f0.inn[v.id][k])||0) - ((f0.out[v.id]&&f0.out[v.id][k])||0);
       routes.forEach(r=>{ if(r.from===v.id) base-=r.flow[k]; }); // subtract this plan's own outflow (relay hubs forward what they receive)
@@ -728,7 +735,7 @@ function renderUnified(plan){
     const tot={lumber:0,clay:0,iron:0,crop:0};
     const rows=troopVils.map(v=>{
       const inn=(io[v.id]&&io[v.id].in)||{lumber:0,clay:0,iron:0,crop:0}, need=troopNeedsPerHour(v);
-      const avail=k=>((v.prod&&v.prod[k])||0)+(inn[k]||0); // own production + incoming routes
+      const avail=k=>prodBase(v,k)+(inn[k]||0); // own production + incoming routes
       RES.forEach(k=>tot[k]+=avail(k));
       const lci=['lumber','clay','iron'].map(k=>{ const got=avail(k), req=need[k]||0;
         const col=req<1?'ok':(got>=req-0.5?'ok':(got>0?'warn':'bad'));
@@ -796,7 +803,9 @@ function renderOptimizer(){
       <label title="Smallest route worth creating - routes below this hourly flow are dropped">Min route /h: <input type="number" value="${optMinRoute}" style="width:64px" onchange="optMinRoute=+this.value||0;state.optMinRoute=optMinRoute;save();renderOptimizer()"></label>
       <label title="Auto-detected from the server name (e.g. x2)">Server speed: <b style="color:var(--accent);margin-left:4px">&times;${state.serverSpeed||1}</b></label>
       <label title="Alliance commerce bonus % to merchant capacity - ignored entirely if 'Ignore temp. bonuses' is checked"><span style="${state.ignoreBonuses?'opacity:.4;text-decoration:line-through':''}">Alliance trade %:</span> <input type="number" value="${state.allianceBonus||0}" style="width:60px" ${state.ignoreBonuses?'disabled':''} onchange="state.allianceBonus=+this.value||0;save();renderAll()"></label>
-      <label title="The alliance's merchant capacity/speed bonus (e.g. 15%, 25%) is toggled on/off by alliance leadership and isn't permanent. Check this to size routes as if it were 0% - safe even if the bonus is switched off later. Also ignores any bonus baked into synced real capacity values."><input type="checkbox" ${state.ignoreBonuses?'checked':''} onchange="state.ignoreBonuses=this.checked;save();renderAll()"> Ignore temp. bonuses</label>
+      <label title="The alliance's merchant capacity/speed bonus (e.g. 15%, 25%) is toggled on/off by alliance leadership and isn't permanent. Check this to size routes as if it were 0% - safe even if the bonus is switched off later. Also ignores any bonus baked into synced real capacity values."><input type="checkbox" ${state.ignoreBonuses?'checked':''} onchange="state.ignoreBonuses=this.checked;save();renderAll()"> Ignore alliance bonus</label>
+      <label title="The production boost (+25% wood/clay/iron & crop from Gold, or the temporary boost from watching ads) is baked into synced production and can lapse. Check this to plan on base production instead - each village's production is divided by (1 + boost%) below."><input type="checkbox" ${state.ignoreProdBoost?'checked':''} onchange="state.ignoreProdBoost=this.checked;save();renderAll()"> Ignore production boost</label>
+      <label title="The production-boost percentage to divide back out when 'Ignore production boost' is on (Travian is 25%)"><span style="${state.ignoreProdBoost?'':'opacity:.4'}">boost %:</span> <input type="number" value="${state.prodBoostPct||25}" style="width:50px" ${state.ignoreProdBoost?'':'disabled'} onchange="state.prodBoostPct=+this.value||0;save();renderAll()"></label>
       <label title="Great Trainer artifact: all villages train in 3/4 of the time (raises troop-village supply needs)"><input type="checkbox" ${state.greatTrainer?'checked':''} onchange="state.greatTrainer=this.checked;save();renderAll()"> Great Trainer</label>
       <label title="Plan a complete route set ignoring your existing routes (Save replaces the optimizer's previous routes). Uncheck to plan only the gap on top of what you already run."><input type="checkbox" ${optFromScratch?'checked':''} onchange="optFromScratch=this.checked;state.optFromScratch=optFromScratch;save();renderOptimizer()"> From scratch</label>
       <label>Server URL: <input type="text" value="${esc(state.serverUrl||'')}" placeholder="https://rof.x2.europe.travian.com" style="width:220px" onchange="state.serverUrl=this.value.trim().replace(/\/+$/,'');detectServerSpeed(state.serverUrl);renderAll()"></label>
@@ -1010,7 +1019,7 @@ function optimizeTroopSupply(cropPlan){
     const req=troopNeedsPerHour(rec);
     const inn=flows.inn[rec.id]||{};
     // only the shortfall: 24/7 training need minus the village's OWN production and what already flows in
-    nonCrop.forEach(k=>{ req[k]=Math.max(0,req[k]-((rec.prod&&rec.prod[k])||0)-(inn[k]||0)); });
+    nonCrop.forEach(k=>{ req[k]=Math.max(0,req[k]-prodBase(rec,k)-(inn[k]||0)); });
     needs[rec.id]=req;
   });
   // Serve troop villages in priority order; donors are shared across villages
@@ -1288,7 +1297,7 @@ function applyOverflowPlan(){
 function balanceRow(v,flows){
   const inn=flows.inn[v.id]||{}, out=flows.out[v.id]||{};
   const p=projected(v,flows), cells=RES.map(k=>{
-    let base=(v.prod&&v.prod[k])||0; if(k==="crop") base-=consumption(v);
+    let base=prodBase(v,k); if(k==="crop") base-=consumption(v);
     const rawNet=base+(inn[k]||0)-(out[k]||0); // net BEFORE the outgoing cap - tells if sending is what flattens it
     const net=p.net[k], cur=p.cur[k], cap=p.cap[k]||0; let tag, col="ok", eta=Infinity;
     if(net<-0.5){ eta=cur/(-net); col=eta<6?"bad":"warn"; tag="empty in "+hms(eta); }
