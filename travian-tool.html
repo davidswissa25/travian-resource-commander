@@ -547,6 +547,22 @@ function donorFleets(d,dst){
     out.push({kind:"ship", avail:d.shipAvail, cap:Sc, T:Ts, per:Sc/Ts}); }
   return out.sort((a,b)=>b.per-a.per); // fewest carriers per crop/h first
 }
+// Travian trade routes only accept these send intervals (hours). Any computed/entered interval
+// must snap to the nearest one of these, never an arbitrary whole hour.
+const ALLOWED_INTERVALS=[1,2,3,4,6,8,12,24];
+function snapInterval(h){
+  h=+h||1;
+  return ALLOWED_INTERVALS.reduce((best,x)=>Math.abs(x-h)<Math.abs(best-h)?x:best, ALLOWED_INTERVALS[0]);
+}
+// For a computed interval that is an upper-bound safety deadline (e.g. must arrive before a
+// granary empties or before a batch would overflow), round DOWN to the largest allowed value
+// that still respects it - rounding to nearest could pick a longer interval than is safe.
+function snapIntervalFloor(h){
+  h=+h||1;
+  let best=ALLOWED_INTERVALS[0];
+  for(const x of ALLOWED_INTERVALS) if(x<=h) best=x; else break;
+  return best;
+}
 function hhmm(hours){ hours=Math.max(0,hours||0); const h=Math.floor(hours), m=Math.round((hours-h)*60); return (m===60?(h+1):h)+":"+String(m===60?0:m).padStart(2,"0"); }
 function hms(hours){
   if(hours===Infinity||isNaN(hours)) return "&#8734;";
@@ -639,7 +655,7 @@ function buildAutoPlan(mode){
   const overflowPlan = all ? optimizeOverflow(cropPlan, troopPlan) : {routes:[]};
   const merged={};
   const addRoute=(r,tag)=>{
-    const iv=Math.max(1,Math.min(24,Math.round(r.interval||r.intervalHours||1)));
+    const iv=snapInterval(r.interval||r.intervalHours||1);
     const key=r.from+">"+r.to;
     const m=merged[key]||(merged[key]={from:r.from,to:r.to,fromName:r.fromName,toName:r.toName,
       flow:{lumber:0,clay:0,iron:0,crop:0},interval:iv,merchants:0,ships:0,distance:r.distance||0,tags:new Set(),relay:null});
@@ -813,14 +829,14 @@ function optimize(){
   // Batch model: send "perSend" crop every "interval" h. Interval is as long as possible
   // (=round trip, so carriers recycle) but short enough to arrive before the granary empties.
   // If the village drains faster than carriers return, waves overlap => more carriers needed.
-  // Travian trade routes use a WHOLE-hour interval 1..24. Pick the largest such interval
-  // that (a) is near the round trip for carrier efficiency, (b) arrives before the granary
-  // empties, and (c) doesn't overflow the destination granary in one batch.
+  // Travian trade routes only accept intervals of 1,2,3,4,6,8,12,24h. Pick the largest allowed
+  // interval that (a) is near the round trip for carrier efficiency, (b) arrives before the
+  // granary empties, and (c) doesn't overflow the destination granary in one batch.
   function chooseInterval(T,eta,freeSpace,F){
-    let I=Math.max(1,Math.round(T));
-    if(eta>0) I=Math.min(I, Math.floor(eta));
-    if(F>0 && freeSpace>0) I=Math.min(I, Math.floor(freeSpace/F));
-    return Math.max(1, Math.min(24, I||1));
+    let I=Math.max(1,T);
+    if(eta>0) I=Math.min(I, eta);
+    if(F>0 && freeSpace>0) I=Math.min(I, freeSpace/F);
+    return snapIntervalFloor(Math.max(1, Math.min(24, I||1)));
   }
   // Fill a flow target from a donor's fleets (richest carrier first), respecting whole-hour
   // intervals and per-fleet availability. Returns delivered crop/h plus carriers tied up.
@@ -997,7 +1013,7 @@ function optimizeTroopSupply(cropPlan){
     for(const {d,dst} of cands){
       if(nonCrop.every(k=>(need[k]||0)<1)) break;
       const Tm=(2*dst)/effSpeed(d.v);
-      const I=Math.max(1,Math.min(24,Math.round(Tm)||1));
+      const I=snapInterval(Math.max(1,Math.min(24,Tm||1)));
       const waves=Math.ceil(Tm/I), cap=effCap(d.v);
       // Send only what is still needed (not already covered) and what donor has
       const rawSend={}; let totalRaw=0;
@@ -1181,7 +1197,7 @@ function optimizeOverflow(cropPlan, troopPlan){
         if(give<optMinRoute || carr[d.v.id]<=0) break;
         if(r.v.id===d.v.id || r.rate<optMinRoute) continue;
         const dst=dist(d.v,r.v), Tm=(2*dst)/effSpeed(d.v);
-        const I=Math.max(1,Math.min(24,Math.round(Tm)||1)), waves=Math.ceil(Tm/I), cap=effCap(d.v);
+        const I=snapInterval(Math.max(1,Math.min(24,Tm||1))), waves=Math.ceil(Tm/I), cap=effCap(d.v);
         const flow=Math.min(give, r.rate);
         if(flow<optMinRoute) continue;
         let perSend=Math.round(flow*I);
@@ -1488,7 +1504,7 @@ function openRoute(id){
     <div class="field"><label>Clay</label><input type="number" id="r_c" value="${r.resources&&r.resources.clay||0}"></div>
     <div class="field"><label>Iron</label><input type="number" id="r_i" value="${r.resources&&r.resources.iron||0}"></div>
     <div class="field"><label>Crop</label><input type="number" id="r_cr" value="${r.resources&&r.resources.crop||0}"></div>
-    <div class="field"><label>Interval (hours between waves)</label><input type="number" step="1" min="1" max="24" id="r_int" value="${Math.round(r.intervalHours)||1}"></div>
+    <div class="field"><label>Interval (hours between waves)</label><select id="r_int">${ALLOWED_INTERVALS.map(h=>`<option value="${h}" ${snapInterval(r.intervalHours||1)===h?'selected':''}>${h}h</option>`).join("")}</select></div>
     <div class="field"><label>Merchants</label><input type="number" id="r_m" value="${r.merchants||1}"></div>`;
   document.getElementById("rOverlay").classList.add("show");
 }
@@ -1496,7 +1512,7 @@ function saveRoute(){
   const g=id=>document.getElementById(id), num=id=>+g(id).value||0;
   const r={ id:(editingR&&editingR.id)||uid(), from:g("r_from").value, to:g("r_to").value,
     resources:{lumber:num("r_l"),clay:num("r_c"),iron:num("r_i"),crop:num("r_cr")},
-    intervalHours:Math.max(1,Math.min(24,Math.round(num("r_int"))||1)), merchants:num("r_m") };
+    intervalHours:snapInterval(num("r_int")||1), merchants:num("r_m") };
   if(r.from===r.to){ alert("From and To must differ."); return; }
   if(editingR){ const i=state.routes.findIndex(x=>x.id===r.id); state.routes[i]=r; }
   else state.routes.push(r);
@@ -1654,7 +1670,7 @@ function mergeSyncRoutes(incoming){
     const from=findVilByGeo(nr.fromDid,nr.fromX,nr.fromY), to=findVilByGeo(nr.toDid,nr.toX,nr.toY);
     if(!from||!to||from.id===to.id){ skipped++; return; }
     const k=from.id+">"+to.id; keep.add(k);
-    const iv=Math.max(1,Math.min(24,Math.round(nr.intervalHours||24)));
+    const iv=snapInterval(nr.intervalHours||24);
     const cur=map[k]||(map[k]={from:from.id,to:to.id,resources:{lumber:0,clay:0,iron:0,crop:0},intervalHours:iv,merchants:0});
     RES.forEach(r=>cur.resources[r]+=(nr.resources&&nr.resources[r])||0);
     cur.intervalHours=Math.min(cur.intervalHours,iv);
