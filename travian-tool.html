@@ -377,6 +377,7 @@ function normalizeProfile(p, label){
   if(p.serverSpeed==null) p.serverSpeed=2;
   if(p.allianceBonus==null) p.allianceBonus=0;
   if(p.defaultMarket==null) p.defaultMarket=0;
+  if(p.ignoreBonuses==null) p.ignoreBonuses=false; // ignore temporary/toggleable alliance bonuses in capacity & speed math
   ensureIds(p.villages); // backfill missing/duplicate ids so edit & delete always match
   dedupeAndSort(p);      // remove rename-duplicates (same coords) and order by village number
   return p;
@@ -497,20 +498,26 @@ function projected(v, flows){
   return {cur,cap,net,hrs};
 }
 function dist(a,b){ const dx=(a.x||0)-(b.x||0),dy=(a.y||0)-(b.y||0); return Math.max(1,Math.sqrt(dx*dx+dy*dy)); }
-function effSpeed(v){ return (v.merchantSpeed||16)*(state.serverSpeed||1)*(1+((state.allianceBonus||0)/100)); }
+// Travian's alliance "commerce bonus" (merchant capacity/speed) is toggled on/off by the alliance
+// leadership and its % changes over time (e.g. 15%, 25%) - it is NOT permanent. When "Ignore
+// temporary bonuses" is on, treat it as 0% everywhere, and also stop trusting the captured
+// merchantCapacityReal/shipCapacityReal (those were scraped live and may have baked in whatever
+// bonus % was active at sync time), always recomputing from the base formula instead.
+function bonusMult(){ return state.ignoreBonuses ? 1 : (1+((state.allianceBonus||0)/100)); }
+function effSpeed(v){ return (v.merchantSpeed||16)*(state.serverSpeed||1)*bonusMult(); }
 function effCap(v){
   // Prefer the real per-merchant capacity read from the game (already includes server
-  // speed, Trade Office and alliance bonus). Fall back to the computed estimate.
-  if(v.merchantCapacityReal>0) return v.merchantCapacityReal;
+  // speed, Trade Office and alliance bonus) - unless Ignore temporary bonuses is on.
+  if(!state.ignoreBonuses && v.merchantCapacityReal>0) return v.merchantCapacityReal;
   const base=v.merchantCapacity||500, toRate=(v.tribe==="Romans"?20:10),
-  to=1+((v.tradeOfficeLevel||0)*toRate)/100, al=1+((state.allianceBonus||0)/100);
+  to=1+((v.tradeOfficeLevel||0)*toRate)/100, al=bonusMult();
   return base*(state.serverSpeed||1)*to*al; }
 // Trade ships (harbor): a second carrier fleet using the SHIP game constant (no Trade
 // Office bonus, but the alliance commerce bonus and server speed still apply).
 // Real per-ship cargo (read from the game) when available - it's per-village state
 // (harbor level + ship upgrades), not a clean formula. Falls back to the SHIP constant.
-function effShipCap(v){ if(v && v.shipCapacityReal>0) return v.shipCapacityReal; return SHIP.capacity*(state.serverSpeed||1)*(1+((state.allianceBonus||0)/100)); }
-function effShipSpeed(){ return SHIP.speed*(state.serverSpeed||1)*(1+((state.allianceBonus||0)/100)); }
+function effShipCap(v){ if(!state.ignoreBonuses && v && v.shipCapacityReal>0) return v.shipCapacityReal; return SHIP.capacity*(state.serverSpeed||1)*bonusMult(); }
+function effShipSpeed(){ return SHIP.speed*(state.serverSpeed||1)*bonusMult(); }
 function maxShips(v){ return Math.max(0, v.tradeShips||0); }
 function maxMerchants(v){ const lvl=(v.marketplaceLevel||state.defaultMarket||0); return lvl>0?lvl:0; }
 // Carriers (merchants + ships) already tied up by existing routes. A route sending
@@ -788,7 +795,8 @@ function renderOptimizer(){
       <label title="Per hour of each resource to keep in a Still-building village before it donates (0 elsewhere)">Build buffer /h: <input type="number" value="${optMargin}" style="width:64px" onchange="optMargin=+this.value||0;state.optMargin=optMargin;save();renderOptimizer()"></label>
       <label title="Smallest route worth creating - routes below this hourly flow are dropped">Min route /h: <input type="number" value="${optMinRoute}" style="width:64px" onchange="optMinRoute=+this.value||0;state.optMinRoute=optMinRoute;save();renderOptimizer()"></label>
       <label title="Auto-detected from the server name (e.g. x2)">Server speed: <b style="color:var(--accent);margin-left:4px">&times;${state.serverSpeed||1}</b></label>
-      <label title="Alliance commerce bonus % to merchant capacity">Alliance trade %: <input type="number" value="${state.allianceBonus||0}" style="width:60px" onchange="state.allianceBonus=+this.value||0;save();renderAll()"></label>
+      <label title="Alliance commerce bonus % to merchant capacity - ignored entirely if 'Ignore temp. bonuses' is checked"><span style="${state.ignoreBonuses?'opacity:.4;text-decoration:line-through':''}">Alliance trade %:</span> <input type="number" value="${state.allianceBonus||0}" style="width:60px" ${state.ignoreBonuses?'disabled':''} onchange="state.allianceBonus=+this.value||0;save();renderAll()"></label>
+      <label title="The alliance's merchant capacity/speed bonus (e.g. 15%, 25%) is toggled on/off by alliance leadership and isn't permanent. Check this to size routes as if it were 0% - safe even if the bonus is switched off later. Also ignores any bonus baked into synced real capacity values."><input type="checkbox" ${state.ignoreBonuses?'checked':''} onchange="state.ignoreBonuses=this.checked;save();renderAll()"> Ignore temp. bonuses</label>
       <label title="Great Trainer artifact: all villages train in 3/4 of the time (raises troop-village supply needs)"><input type="checkbox" ${state.greatTrainer?'checked':''} onchange="state.greatTrainer=this.checked;save();renderAll()"> Great Trainer</label>
       <label title="Plan a complete route set ignoring your existing routes (Save replaces the optimizer's previous routes). Uncheck to plan only the gap on top of what you already run."><input type="checkbox" ${optFromScratch?'checked':''} onchange="optFromScratch=this.checked;state.optFromScratch=optFromScratch;save();renderOptimizer()"> From scratch</label>
       <label>Server URL: <input type="text" value="${esc(state.serverUrl||'')}" placeholder="https://rof.x2.europe.travian.com" style="width:220px" onchange="state.serverUrl=this.value.trim().replace(/\/+$/,'');detectServerSpeed(state.serverUrl);renderAll()"></label>
