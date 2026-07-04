@@ -785,15 +785,16 @@ function renderOptimizer(){
           <option value="crop" ${optMode==='crop'?'selected':''}>Crop only (anti-starvation)</option>
           <option value="all" ${optMode==='all'?'selected':''}>All-in-one (crop + troops + celebrations + overflow)</option>
         </select></label>
-      <label title="Per hour of each resource to keep in a Still-building village before it donates (0 elsewhere)">Build buffer /h: <input type="number" value="${optMargin}" style="width:64px" onchange="optMargin=+this.value;state.optMargin=optMargin;save();renderOptimizer()"></label>
-      <label title="Smallest route worth creating - routes below this hourly flow are dropped">Min route /h: <input type="number" value="${optMinRoute}" style="width:64px" onchange="optMinRoute=+this.value;state.optMinRoute=optMinRoute;save();renderOptimizer()"></label>
+      <label title="Per hour of each resource to keep in a Still-building village before it donates (0 elsewhere)">Build buffer /h: <input type="number" value="${optMargin}" style="width:64px" onchange="optMargin=+this.value||0;state.optMargin=optMargin;save();renderOptimizer()"></label>
+      <label title="Smallest route worth creating - routes below this hourly flow are dropped">Min route /h: <input type="number" value="${optMinRoute}" style="width:64px" onchange="optMinRoute=+this.value||0;state.optMinRoute=optMinRoute;save();renderOptimizer()"></label>
       <label title="Auto-detected from the server name (e.g. x2)">Server speed: <b style="color:var(--accent);margin-left:4px">&times;${state.serverSpeed||1}</b></label>
       <label title="Alliance commerce bonus % to merchant capacity">Alliance trade %: <input type="number" value="${state.allianceBonus||0}" style="width:60px" onchange="state.allianceBonus=+this.value||0;save();renderAll()"></label>
       <label title="Great Trainer artifact: all villages train in 3/4 of the time (raises troop-village supply needs)"><input type="checkbox" ${state.greatTrainer?'checked':''} onchange="state.greatTrainer=this.checked;save();renderAll()"> Great Trainer</label>
-      <label title="Plan a complete route set ignoring your existing routes (Apply replaces the optimizer's previous routes). Uncheck to plan only the gap on top of what you already run."><input type="checkbox" ${optFromScratch?'checked':''} onchange="optFromScratch=this.checked;state.optFromScratch=optFromScratch;save();renderOptimizer()"> From scratch</label>
+      <label title="Plan a complete route set ignoring your existing routes (Save replaces the optimizer's previous routes). Uncheck to plan only the gap on top of what you already run."><input type="checkbox" ${optFromScratch?'checked':''} onchange="optFromScratch=this.checked;state.optFromScratch=optFromScratch;save();renderOptimizer()"> From scratch</label>
       <label>Server URL: <input type="text" value="${esc(state.serverUrl||'')}" placeholder="https://rof.x2.europe.travian.com" style="width:220px" onchange="state.serverUrl=this.value.trim().replace(/\/+$/,'');detectServerSpeed(state.serverUrl);renderAll()"></label>
       <div class="grow"></div>
-      <button class="primary" onclick="applyAutoPlan()" ${plan.routes.length?'':'disabled'}>Apply ${plan.routes.length} route${plan.routes.length===1?'':'s'}</button>
+      <button class="primary" onclick="renderOptimizer()" title="Re-run the optimizer now with the settings above">&#8635; Generate routes</button>
+      <button class="ghost" onclick="applyAutoPlan()" ${plan.routes.length?'':'disabled'} title="Save these suggested routes into your tracked Trade Routes (for dashboard projections) - it does not create anything in-game, use the +Route link per row for that">Save ${plan.routes.length} route${plan.routes.length===1?'':'s'}</button>
     </div>
     <p class="note">${plan.summary}</p>
     ${plan.routes.length ? renderUnified(plan) : `<div class="empty"><h3>&#9989; Nothing to route</h3><p>No crop deficits${optMode==='all'?', troop/celebration shortfalls or overflow':''} that a donor can cover right now.</p></div>`}
