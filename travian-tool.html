@@ -355,8 +355,14 @@ let state = activeProfile();
 let tab = "dash";
 let editingV = null, editingR = null;
 let optTroopRows = [];
-let optMargin = 1000, optMode = "crop", optMinRoute = 200; // optMargin = per-hour reserve kept in still-building villages
-let optFromScratch = true; // plan a full route set ignoring existing routes (not incremental on top)
+let optMargin, optMode, optMinRoute, optFromScratch; // Auto-Routes settings; loaded from the active profile
+// Pull the optimizer settings from the active profile (persisted across reloads / per profile).
+function loadOptSettings(){
+  optMode = state.optMode || "crop";
+  optMargin = state.optMargin!=null ? state.optMargin : 1000; // per-hour reserve kept in still-building villages
+  optMinRoute = state.optMinRoute!=null ? state.optMinRoute : 200;
+  optFromScratch = state.optFromScratch!=null ? state.optFromScratch : true;
+}
 let pasteResults = [];
 let balancePer = 1; // Balance-analysis display window in hours: 1 = per hour, 24 = per day
 
@@ -408,7 +414,7 @@ function ensureProfileForAccount(a){
   }
   return p;
 }
-function setActiveProfile(id){ if(!db.profiles.some(p=>p.id===id)) return; db.activeId=id; state=activeProfile(); save(); renderAll(); }
+function setActiveProfile(id){ if(!db.profiles.some(p=>p.id===id)) return; db.activeId=id; state=activeProfile(); loadOptSettings(); save(); renderAll(); }
 function newProfile(){
   const label=(window.prompt("New profile name:","Account")||"").trim(); if(!label) return;
   const p=normalizeProfile({}, label); db.profiles.push(p); db.activeId=p.id; state=activeProfile(); save(); renderAll();
@@ -674,8 +680,10 @@ function buildAutoPlan(mode){
   const summary = routes.length
     ? `${routes.length} trade route${routes.length>1?'s':''} across ${Object.keys(bySrc).length} village(s), moving ${parts.join(" + ")||"—"} per hour.`
     : (cropPlan.balanced && all ? "Everything is balanced — no crop deficit, no troop/celebration shortfall, no overflow." : cropPlan.summary);
-  const unmetNote = cropPlan.unmet && cropPlan.unmet.length
+  let unmetNote = cropPlan.unmet && cropPlan.unmet.length
     ? `<p class="note">&#9888; Crop still uncovered: ${cropPlan.unmet.map(u=>esc(u.name)+" ("+fmt(u.need)+"/h short)").join(", ")}.</p>` : "";
+  if(overflowPlan.urgent && overflowPlan.urgent.length)
+    unmetNote += `<p class="note">&#9888; Warehouse still filling within ${WAREHOUSE_FILL_H}h (out of carriers or troop-village room): ${overflowPlan.urgent.join(", ")}. Raise Marketplace levels/trade ships or add another troop village.</p>`;
   return {routes, summary, unmetNote, cropPlan};
 }
 function renderUnified(plan){
@@ -750,16 +758,16 @@ function renderOptimizer(){
     <div class="opt-controls">
       <strong>&#9889; Auto routes</strong>
       <label>Mode:
-        <select onchange="optMode=this.value;renderOptimizer()">
+        <select onchange="optMode=this.value;state.optMode=optMode;save();renderOptimizer()">
           <option value="crop" ${optMode==='crop'?'selected':''}>Crop only (anti-starvation)</option>
           <option value="all" ${optMode==='all'?'selected':''}>All-in-one (crop + troops + celebrations + overflow)</option>
         </select></label>
-      <label title="Per hour of each resource to keep in a Still-building village before it donates (0 elsewhere)">Build buffer /h: <input type="number" value="${optMargin}" style="width:64px" onchange="optMargin=+this.value;renderOptimizer()"></label>
-      <label title="Smallest route worth creating - routes below this hourly flow are dropped">Min route /h: <input type="number" value="${optMinRoute}" style="width:64px" onchange="optMinRoute=+this.value;renderOptimizer()"></label>
+      <label title="Per hour of each resource to keep in a Still-building village before it donates (0 elsewhere)">Build buffer /h: <input type="number" value="${optMargin}" style="width:64px" onchange="optMargin=+this.value;state.optMargin=optMargin;save();renderOptimizer()"></label>
+      <label title="Smallest route worth creating - routes below this hourly flow are dropped">Min route /h: <input type="number" value="${optMinRoute}" style="width:64px" onchange="optMinRoute=+this.value;state.optMinRoute=optMinRoute;save();renderOptimizer()"></label>
       <label title="Auto-detected from the server name (e.g. x2)">Server speed: <b style="color:var(--accent);margin-left:4px">&times;${state.serverSpeed||1}</b></label>
       <label title="Alliance commerce bonus % to merchant capacity">Alliance trade %: <input type="number" value="${state.allianceBonus||0}" style="width:60px" onchange="state.allianceBonus=+this.value||0;save();renderAll()"></label>
       <label title="Great Trainer artifact: all villages train in 3/4 of the time (raises troop-village supply needs)"><input type="checkbox" ${state.greatTrainer?'checked':''} onchange="state.greatTrainer=this.checked;save();renderAll()"> Great Trainer</label>
-      <label title="Plan a complete route set ignoring your existing routes (Apply replaces the optimizer's previous routes). Uncheck to plan only the gap on top of what you already run."><input type="checkbox" ${optFromScratch?'checked':''} onchange="optFromScratch=this.checked;renderOptimizer()"> From scratch</label>
+      <label title="Plan a complete route set ignoring your existing routes (Apply replaces the optimizer's previous routes). Uncheck to plan only the gap on top of what you already run."><input type="checkbox" ${optFromScratch?'checked':''} onchange="optFromScratch=this.checked;state.optFromScratch=optFromScratch;save();renderOptimizer()"> From scratch</label>
       <label>Server URL: <input type="text" value="${esc(state.serverUrl||'')}" placeholder="https://rof.x2.europe.travian.com" style="width:220px" onchange="state.serverUrl=this.value.trim().replace(/\/+$/,'');detectServerSpeed(state.serverUrl);renderAll()"></label>
       <div class="grow"></div>
       <button class="primary" onclick="applyAutoPlan()" ${plan.routes.length?'':'disabled'}>Apply ${plan.routes.length} route${plan.routes.length===1?'':'s'}</button>
@@ -1124,6 +1132,7 @@ function applyTroopPlan(){
 // carriers, so the same merchant is never booked twice. Troop villages are excluded as
 // receivers here - they're fed precisely by optimizeTroopSupply instead.
 const OVERFLOW_HORIZON = 48; // h: only relieve villages that will overflow this soon
+const WAREHOUSE_FILL_H = 8;  // h: a warehouse filling sooner than this is urgent - relieve it first
 function optimizeOverflow(cropPlan, troopPlan){
   const nonCrop=["lumber","clay","iron"];
   const flows=planFlows(), committed=planCommitted();
@@ -1142,14 +1151,18 @@ function optimizeOverflow(cropPlan, troopPlan){
   const usedByTroop={};
   ((troopPlan&&troopPlan.routes)||[]).forEach(r=>{ const e=usedByTroop[r.from]||(usedByTroop[r.from]={lumber:0,clay:0,iron:0}); nonCrop.forEach(k=>e[k]+=(r.resources[k]||0)/(r.interval||1)); });
   const troopVils=state.villages.filter(v=>v.troopVillage).sort((a,b)=>(a.troopPriority||1)-(b.troopPriority||1));
-  const routes=[]; let anyDonor=false; const anyRecv=troopVils.length>0;
+  const routes=[]; let anyDonor=false; const anyRecv=troopVils.length>0; const urgent=new Set();
   nonCrop.forEach(k=>{
     // Donors: any NON-troop village with production surplus above its own reserve (celebration + build
     // buffer) and beyond what it already sends to cover troop needs. All of it is forwarded to troops.
+    // Sorted by how soon its warehouse fills, so the ones filling within WAREHOUSE_FILL_H are relieved
+    // first with the limited carriers (cascading to the next troop village as each fills).
     const donors=state.villages.filter(v=>!v.troopVillage).map(v=>{
-      const net=proj[v.id].net[k], res=keepReserve(v)[k]||0, ut=(usedByTroop[v.id]&&usedByTroop[v.id][k])||0;
-      return {v, give:Math.max(0, net-res-ut)};
-    }).filter(d=>d.give>0.5);
+      const p=proj[v.id], net=p.net[k], cap=p.cap[k]||0, cur=p.cur[k];
+      const res=keepReserve(v)[k]||0, ut=(usedByTroop[v.id]&&usedByTroop[v.id][k])||0;
+      const eta = net>0.5 && cap>0 ? (cap-cur)/net : Infinity;
+      return {v, give:Math.max(0, net-res-ut), eta};
+    }).filter(d=>d.give>0.5).sort((a,b)=>a.eta-b.eta);
     // Receivers: troop-making villages in priority order (their warehouse room, refreshed by training).
     const receivers=troopVils.map(v=>{ const p=proj[v.id], cap=p.cap[k]||0, cur=p.cur[k];
       const room=Math.max(0,cap-cur)+(troopNeedsPerHour(v)[k]||0)*OVERFLOW_HORIZON; // training consumes over time -> extra effective room
@@ -1176,6 +1189,8 @@ function optimizeOverflow(cropPlan, troopPlan){
           impact:'to troops'});
         give-=ph; carr[d.v.id]-=carriers; r.room-=perSend;
       }
+      // still filling within the 8h target after routing all we could (carriers/room limited)
+      if(d.eta<WAREHOUSE_FILL_H && give>optMinRoute) urgent.add(esc(d.v.name));
     });
   });
   // Stagger send offsets per source so carriers aren't all out at once.
@@ -1189,7 +1204,8 @@ function optimizeOverflow(cropPlan, troopPlan){
   } else {
     summary = `${routes.length} route${routes.length>1?'s':''} forwarding surplus lumber/clay/iron to your troop-making villages.`;
   }
-  return {routes,summary};
+  if(urgent.size) summary += ` &#9888; Still filling within ${WAREHOUSE_FILL_H}h (out of carriers or troop-village room): ${[...urgent].join(", ")}.`;
+  return {routes,summary,urgent:[...urgent]};
 }
 function renderOverflowSection(cropPlan){
   const troopPlan=optimizeTroopSupply(cropPlan);
@@ -1738,6 +1754,7 @@ function renderAll(){
   else if(tab==="optimizer") renderOptimizer();
   else if(tab==="routes") renderRoutes();
 }
+loadOptSettings();
 renderAll();
 setInterval(renderAll,30000);
 // Esc = cancel / go back: close the top-most open dialog (village / route / paste overlay).
