@@ -32,7 +32,7 @@
   .pgroup button{border-color:transparent;background:transparent;padding:5px 8px}
   .pgroup .sep{width:1px;align-self:stretch;background:var(--line);margin:2px 1px}
   main{padding:18px 20px;max-width:1280px;margin:0 auto}
-  .cmd{display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin-bottom:20px}
+  .cmd{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:12px;margin-bottom:20px}
   .stat{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:14px 16px}
   .stat .lbl{font-size:11px;text-transform:uppercase;letter-spacing:.6px;color:var(--dim)}
   .stat .val{font-size:22px;font-weight:700;margin-top:4px}
@@ -564,8 +564,11 @@ function renderCmd(){
     // village will empty its granary - no separate "incoming" guard (that double-counted routes).
     if(p.net.crop<0){ draining++; const t=p.cur.crop/(-p.net.crop); if(t<soonest){soonest=t;soonestName=v.name;} } });
   const soonStr = soonest===Infinity ? "&mdash;" : hms(soonest);
+  const prodTot={lumber:0,clay:0,iron:0,crop:0};
+  state.villages.forEach(v=>RES.forEach(k=>prodTot[k]+=(v.prod&&v.prod[k])||0)); // account-wide gross production /h
   document.getElementById("cmdbar").innerHTML = `
     <div class="stat"><div class="lbl">Villages</div><div class="val">${state.villages.length}</div><div class="sub">${state.routes.length} active routes</div></div>
+    <div class="stat"><div class="lbl">Production / h</div><div class="val" style="font-size:15px;line-height:1.35">${['lumber','clay','iron','crop'].map(k=>`<span style="color:var(--${k})">${fmt(prodTot[k])}</span>`).join(' <span style="color:var(--faint)">&middot;</span> ')}</div><div class="sub">lumber &middot; clay &middot; iron &middot; crop (all villages)</div></div>
     <div class="stat"><div class="lbl">Account crop / h</div><div class="val ${totalCrop>=0?'good':'bad'}">${signed(totalCrop)}</div><div class="sub">net across all villages</div></div>
     <div class="stat"><div class="lbl">Villages draining</div><div class="val ${draining?'warn':'good'}">${draining}</div><div class="sub">crop deficit right now</div></div>
     <div class="stat"><div class="lbl">Soonest starvation</div><div class="val ${soonest<24?'bad':soonest===Infinity?'good':'warn'}">${soonStr}</div><div class="sub">${esc(soonestName)||'all stable'}</div></div>`;
