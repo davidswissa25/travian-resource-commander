@@ -982,7 +982,8 @@ function optimizeTroopSupply(cropPlan){
   troopVils.forEach(rec=>{
     const req=troopNeedsPerHour(rec);
     const inn=flows.inn[rec.id]||{};
-    nonCrop.forEach(k=>{ req[k]=Math.max(0,req[k]-(inn[k]||0)); });
+    // only the shortfall: 24/7 training need minus the village's OWN production and what already flows in
+    nonCrop.forEach(k=>{ req[k]=Math.max(0,req[k]-((rec.prod&&rec.prod[k])||0)-(inn[k]||0)); });
     needs[rec.id]=req;
   });
   // Serve troop villages in priority order; donors are shared across villages
@@ -1168,20 +1169,20 @@ function optimizeOverflow(cropPlan, troopPlan){
       const eta = net>0.5 && cap>0 ? (cap-cur)/net : Infinity;
       return {v, give:Math.max(0, net-res-ut), eta};
     }).filter(d=>d.give>0.5).sort((a,b)=>a.eta-b.eta);
-    // Receivers: troop-making villages in priority order (their warehouse room, refreshed by training).
+    // Receivers: troop villages (priority order). Cap the overflow RATE so its warehouse can't fill
+    // in under 8h (while training, the extra inflow beyond the training need is what accumulates).
     const receivers=troopVils.map(v=>{ const p=proj[v.id], cap=p.cap[k]||0, cur=p.cur[k];
-      const room=Math.max(0,cap-cur)+(troopNeedsPerHour(v)[k]||0)*OVERFLOW_HORIZON; // training consumes over time -> extra effective room
-      return {v, room};
-    }).filter(r=>r.room>optMinRoute);
+      return {v, rate:Math.max(0,(cap-cur)/WAREHOUSE_FILL_H)};
+    }).filter(r=>r.rate>0.5);
     if(donors.length) anyDonor=true;
     donors.forEach(d=>{
       let give=d.give;
       for(const r of receivers){
         if(give<optMinRoute || carr[d.v.id]<=0) break;
-        if(r.v.id===d.v.id || r.room<optMinRoute) continue;
+        if(r.v.id===d.v.id || r.rate<optMinRoute) continue;
         const dst=dist(d.v,r.v), Tm=(2*dst)/effSpeed(d.v);
         const I=Math.max(1,Math.min(24,Math.round(Tm)||1)), waves=Math.ceil(Tm/I), cap=effCap(d.v);
-        const flow=Math.min(give, r.room/I);
+        const flow=Math.min(give, r.rate);
         if(flow<optMinRoute) continue;
         let perSend=Math.round(flow*I);
         let carriers=Math.max(1,Math.ceil(perSend/cap))*waves;
@@ -1192,7 +1193,7 @@ function optimizeOverflow(cropPlan, troopPlan){
           perSend,interval:I,distance:Math.round(dst),merchants:carriers,perHour:ph,
           resources:{lumber:k==='lumber'?perSend:0,clay:k==='clay'?perSend:0,iron:k==='iron'?perSend:0,crop:0},
           impact:'to troops'});
-        give-=ph; carr[d.v.id]-=carriers; r.room-=perSend;
+        give-=ph; carr[d.v.id]-=carriers; r.rate-=ph;
       }
       // still filling within the 8h target after routing all we could (carriers/room limited)
       if(d.eta<WAREHOUSE_FILL_H && give>optMinRoute) urgent.add(esc(d.v.name));
