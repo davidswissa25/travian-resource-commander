@@ -530,6 +530,12 @@ function boostSummary(){
   const parts=Object.keys(byPct).map(Number).sort((a,b)=>a-b).map(pc=>`+${pc}% ${[...byPct[pc]].join('/')}`);
   return { text: parts.length?parts.join(', '):(anyData?'none active':'no data'), active:parts.length>0, anyManual };
 }
+// Set a troop village's supply priority straight from the Auto Routes summary (1 = supplied first),
+// then re-run the optimizer so the plan reflects the new order.
+function setTroopPriority(vid, val){
+  const v=state.villages.find(x=>x.id===vid); if(!v) return;
+  v.troopPriority=Math.max(1, Math.round(+val||1)); save(); renderOptimizer();
+}
 function effSpeed(v){ return (v.merchantSpeed||16)*(state.serverSpeed||1)*bonusMult(); }
 function effCap(v){
   // Prefer the real per-merchant capacity read from the game (already includes server
@@ -765,9 +771,9 @@ function renderUnified(plan){
         if(netk>0.5 && cap>0){ const e=(cap-cur)/netk; if(e<fill) fill=e; } });
       const fillCell = fill===Infinity ? '<span style="color:var(--faint)">&mdash;</span>'
         : `<span style="color:var(--${fill<WAREHOUSE_FILL_H?'bad':fill<24?'warn':'ok'})">${hms(fill)}</span>`;
-      return `<tr><td>#${v.troopPriority||1} ${esc(v.name)}</td>${lci}<td class="num" style="color:var(--crop)">${fmt(avail('crop'))}</td><td class="num">${fillCell}</td></tr>`;
+      return `<tr><td><input type="number" min="1" value="${v.troopPriority||1}" title="Supply priority — 1 is supplied first. Edit to reorder." style="width:42px" onchange="setTroopPriority('${v.id}',this.value)"> ${esc(v.name)}</td>${lci}<td class="num" style="color:var(--crop)">${fmt(avail('crop'))}</td><td class="num">${fillCell}</td></tr>`;
     }).join('');
-    troopTable=`<div style="margin-bottom:16px"><b>&#9876; Supply at troop villages /h</b> <span class="note" style="margin:0">&mdash; own production + incoming <span style="color:var(--faint)">/ 24&#8260;7 training need</span>; warehouse fill = soonest of L/C/I if <b>not</b> training</span>
+    troopTable=`<div style="margin-bottom:16px"><b>&#9876; Supply at troop villages /h</b> <span class="note" style="margin:0">&mdash; own production + incoming <span style="color:var(--faint)">/ 24&#8260;7 training need</span>; warehouse fill = soonest of L/C/I if <b>not</b> training; edit <b>#</b> to reorder supply priority</span>
       <table style="margin-top:6px"><thead><tr><th>Troop village</th><th class="num">Lumber</th><th class="num">Clay</th><th class="num">Iron</th><th class="num">Crop</th><th class="num">Warehouse fills</th></tr></thead><tbody>
       ${rows}<tr style="font-weight:650"><td>Total</td><td class="num" style="color:var(--lumber)">${fmt(tot.lumber)}</td><td class="num" style="color:var(--clay)">${fmt(tot.clay)}</td><td class="num" style="color:var(--iron)">${fmt(tot.iron)}</td><td class="num" style="color:var(--crop)">${fmt(tot.crop)}</td><td></td></tr></tbody></table></div>`;
   }
