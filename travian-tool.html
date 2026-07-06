@@ -377,7 +377,6 @@ function normalizeProfile(p, label){
   if(p.serverSpeed==null) p.serverSpeed=2;
   if(p.allianceBonus==null) p.allianceBonus=0;
   if(p.defaultMarket==null) p.defaultMarket=0;
-  if(p.ignoreBonuses==null) p.ignoreBonuses=false; // ignore temporary/toggleable alliance bonuses in capacity & speed math
   if(p.ignoreProdBoost==null) p.ignoreProdBoost=false; // plan on base production, ignoring the (temporary) gold/ad production boost
   if(p.prodBoostPct==null) p.prodBoostPct=25;
   ensureIds(p.villages); // backfill missing/duplicate ids so edit & delete always match
@@ -505,7 +504,7 @@ function dist(a,b){ const dx=(a.x||0)-(b.x||0),dy=(a.y||0)-(b.y||0); return Math
 // temporary bonuses" is on, treat it as 0% everywhere, and also stop trusting the captured
 // merchantCapacityReal/shipCapacityReal (those were scraped live and may have baked in whatever
 // bonus % was active at sync time), always recomputing from the base formula instead.
-function bonusMult(){ return state.ignoreBonuses ? 1 : (1+((state.allianceBonus||0)/100)); }
+function bonusMult(){ return 1+((state.allianceBonus||0)/100); }
 // Base (unboosted) production: the captured production already includes any active production boost
 // (the +15% from watching ads, or the +25% from Gold - either can differ per resource and can lapse).
 // With "Ignore production boost" on, strip it so routes are sized on sustainable base production.
@@ -539,8 +538,8 @@ function setTroopPriority(vid, val){
 function effSpeed(v){ return (v.merchantSpeed||16)*(state.serverSpeed||1)*bonusMult(); }
 function effCap(v){
   // Prefer the real per-merchant capacity read from the game (already includes server
-  // speed, Trade Office and alliance bonus) - unless Ignore temporary bonuses is on.
-  if(!state.ignoreBonuses && v.merchantCapacityReal>0) return v.merchantCapacityReal;
+  // speed, Trade Office and the permanent alliance bonus).
+  if(v.merchantCapacityReal>0) return v.merchantCapacityReal;
   const base=v.merchantCapacity||500, toRate=(v.tribe==="Romans"?20:10),
   to=1+((v.tradeOfficeLevel||0)*toRate)/100, al=bonusMult();
   return base*(state.serverSpeed||1)*to*al; }
@@ -548,7 +547,7 @@ function effCap(v){
 // Office bonus, but the alliance commerce bonus and server speed still apply).
 // Real per-ship cargo (read from the game) when available - it's per-village state
 // (harbor level + ship upgrades), not a clean formula. Falls back to the SHIP constant.
-function effShipCap(v){ if(!state.ignoreBonuses && v && v.shipCapacityReal>0) return v.shipCapacityReal; return SHIP.capacity*(state.serverSpeed||1)*bonusMult(); }
+function effShipCap(v){ if(v && v.shipCapacityReal>0) return v.shipCapacityReal; return SHIP.capacity*(state.serverSpeed||1)*bonusMult(); }
 function effShipSpeed(){ return SHIP.speed*(state.serverSpeed||1)*bonusMult(); }
 function maxShips(v){ return Math.max(0, v.tradeShips||0); }
 function maxMerchants(v){ const lvl=(v.marketplaceLevel||state.defaultMarket||0); return lvl>0?lvl:0; }
@@ -828,8 +827,7 @@ function renderOptimizer(){
       <label title="Per hour of each resource to keep in a Still-building village before it donates (0 elsewhere)">Build buffer /h: <input type="number" value="${optMargin}" style="width:64px" onchange="optMargin=+this.value||0;state.optMargin=optMargin;save();renderOptimizer()"></label>
       <label title="Smallest route worth creating - routes below this hourly flow are dropped">Min route /h: <input type="number" value="${optMinRoute}" style="width:64px" onchange="optMinRoute=+this.value||0;state.optMinRoute=optMinRoute;save();renderOptimizer()"></label>
       <label title="Auto-detected from the server name (e.g. x2)">Server speed: <b style="color:var(--accent);margin-left:4px">&times;${state.serverSpeed||1}</b></label>
-      <label title="Alliance commerce bonus % to merchant capacity - ignored entirely if 'Ignore temp. bonuses' is checked"><span style="${state.ignoreBonuses?'opacity:.4;text-decoration:line-through':''}">Alliance trade %:</span> <input type="number" value="${state.allianceBonus||0}" style="width:60px" ${state.ignoreBonuses?'disabled':''} onchange="state.allianceBonus=+this.value||0;save();renderAll()"></label>
-      <label title="The alliance's merchant capacity/speed bonus (e.g. 15%, 25%) is toggled on/off by alliance leadership and isn't permanent. Check this to size routes as if it were 0% - safe even if the bonus is switched off later. Also ignores any bonus baked into synced real capacity values."><input type="checkbox" ${state.ignoreBonuses?'checked':''} onchange="state.ignoreBonuses=this.checked;save();renderAll()"> Ignore alliance bonus</label>
+      <label title="Alliance commerce bonus % applied to merchant capacity & speed (used only for villages without a game-synced real capacity)">Alliance trade %: <input type="number" value="${state.allianceBonus||0}" style="width:60px" onchange="state.allianceBonus=+this.value||0;save();renderAll()"></label>
       <label title="Your synced production already includes any active production boost, detected per resource from the game (+15% from watching ads, or +25% from Gold - either can lapse). Check this to plan on sustainable base production instead: the exact detected amount is stripped from each synced village."><input type="checkbox" ${state.ignoreProdBoost?'checked':''} onchange="state.ignoreProdBoost=this.checked;save();renderAll()"> Ignore production boost</label>
       <span title="What the last game pull detected in your production numbers" style="font-size:11px;color:var(--faint);align-self:center">detected: <b style="color:${bs.active?'var(--accent)':'var(--faint)'}">${esc(bs.text)}</b></span>
       ${bs.anyManual?`<label title="Fallback boost % for hand-added villages that have no detected boost data - synced villages always use their own exact detected amount"><span style="${state.ignoreProdBoost?'':'opacity:.4'}">fallback %:</span> <input type="number" value="${state.prodBoostPct||25}" style="width:50px" ${state.ignoreProdBoost?'':'disabled'} onchange="state.prodBoostPct=+this.value||0;save();renderAll()"></label>`:''}
