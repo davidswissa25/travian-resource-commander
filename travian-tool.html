@@ -507,10 +507,29 @@ function dist(a,b){ const dx=(a.x||0)-(b.x||0),dy=(a.y||0)-(b.y||0); return Math
 // bonus % was active at sync time), always recomputing from the base formula instead.
 function bonusMult(){ return state.ignoreBonuses ? 1 : (1+((state.allianceBonus||0)/100)); }
 // Base (unboosted) production: the captured production already includes any active production boost
-// (the +25% wood/clay/iron & crop from Gold, or the temporary boost from watching ads), which is
-// NOT permanent. With "Ignore production boost" on, divide it back out so routes are sized on the
-// sustainable base production instead of a boost that can lapse.
-function prodBase(v,k){ const p=(v&&v.prod&&v.prod[k])||0; return state.ignoreProdBoost ? p/(1+((state.prodBoostPct||25)/100)) : p; }
+// (the +15% from watching ads, or the +25% from Gold - either can differ per resource and can lapse).
+// With "Ignore production boost" on, strip it so routes are sized on sustainable base production.
+// The sync now captures the EXACT flat amount each boost adds (v.prodBoost[k]) -> base = prod - amount,
+// per resource. Villages added by hand (no boost data) fall back to the manual % division.
+function prodBase(v,k){
+  const p=(v&&v.prod&&v.prod[k])||0;
+  if(!state.ignoreProdBoost) return p;
+  if(v && v.prodBoost && v.prodBoost[k]!=null) return Math.max(0, p-(+v.prodBoost[k]||0)); // exact, detected amount
+  return p/(1+((state.prodBoostPct||25)/100)); // fallback for un-synced villages
+}
+// What the last sync actually detected in the production data, so the user can see whether the
+// pulled numbers include a boost and which one (15 or 25%) before choosing to ignore it. Boosts
+// can differ per resource (e.g. +15% wood/clay/iron from ads, +25% crop from Gold).
+function boostSummary(){
+  const LBL={lumber:'wood',clay:'clay',iron:'iron',crop:'crop'};
+  const byPct={}; let anyData=false, anyManual=false;
+  state.villages.forEach(v=>{
+    if(v.prodBoostPct){ anyData=true; RES.forEach(k=>{ const pc=+v.prodBoostPct[k]||0; if(pc>0)(byPct[pc]=byPct[pc]||new Set()).add(LBL[k]); }); }
+    else anyManual=true; // hand-added village with no detected boost data
+  });
+  const parts=Object.keys(byPct).map(Number).sort((a,b)=>a-b).map(pc=>`+${pc}% ${[...byPct[pc]].join('/')}`);
+  return { text: parts.length?parts.join(', '):(anyData?'none active':'no data'), active:parts.length>0, anyManual };
+}
 function effSpeed(v){ return (v.merchantSpeed||16)*(state.serverSpeed||1)*bonusMult(); }
 function effCap(v){
   // Prefer the real per-merchant capacity read from the game (already includes server
@@ -791,6 +810,7 @@ function renderOptimizer(){
   const el=document.getElementById("tab-optimizer");
   if(state.villages.length<2){ el.innerHTML=`<div class="empty"><h3>Need at least 2 villages</h3><p>The optimizer moves surplus crop to villages that are draining.</p></div>`; return; }
   const plan=buildAutoPlan(optMode);
+  const bs=boostSummary();
   el.innerHTML=`
     <div class="opt-controls">
       <strong>&#9889; Auto routes</strong>
@@ -804,8 +824,9 @@ function renderOptimizer(){
       <label title="Auto-detected from the server name (e.g. x2)">Server speed: <b style="color:var(--accent);margin-left:4px">&times;${state.serverSpeed||1}</b></label>
       <label title="Alliance commerce bonus % to merchant capacity - ignored entirely if 'Ignore temp. bonuses' is checked"><span style="${state.ignoreBonuses?'opacity:.4;text-decoration:line-through':''}">Alliance trade %:</span> <input type="number" value="${state.allianceBonus||0}" style="width:60px" ${state.ignoreBonuses?'disabled':''} onchange="state.allianceBonus=+this.value||0;save();renderAll()"></label>
       <label title="The alliance's merchant capacity/speed bonus (e.g. 15%, 25%) is toggled on/off by alliance leadership and isn't permanent. Check this to size routes as if it were 0% - safe even if the bonus is switched off later. Also ignores any bonus baked into synced real capacity values."><input type="checkbox" ${state.ignoreBonuses?'checked':''} onchange="state.ignoreBonuses=this.checked;save();renderAll()"> Ignore alliance bonus</label>
-      <label title="The production boost (+25% wood/clay/iron & crop from Gold, or the temporary boost from watching ads) is baked into synced production and can lapse. Check this to plan on base production instead - each village's production is divided by (1 + boost%) below."><input type="checkbox" ${state.ignoreProdBoost?'checked':''} onchange="state.ignoreProdBoost=this.checked;save();renderAll()"> Ignore production boost</label>
-      <label title="The production-boost percentage to divide back out when 'Ignore production boost' is on (Travian is 25%)"><span style="${state.ignoreProdBoost?'':'opacity:.4'}">boost %:</span> <input type="number" value="${state.prodBoostPct||25}" style="width:50px" ${state.ignoreProdBoost?'':'disabled'} onchange="state.prodBoostPct=+this.value||0;save();renderAll()"></label>
+      <label title="Your synced production already includes any active production boost, detected per resource from the game (+15% from watching ads, or +25% from Gold - either can lapse). Check this to plan on sustainable base production instead: the exact detected amount is stripped from each synced village."><input type="checkbox" ${state.ignoreProdBoost?'checked':''} onchange="state.ignoreProdBoost=this.checked;save();renderAll()"> Ignore production boost</label>
+      <span title="What the last game pull detected in your production numbers" style="font-size:11px;color:var(--faint);align-self:center">detected: <b style="color:${bs.active?'var(--accent)':'var(--faint)'}">${esc(bs.text)}</b></span>
+      ${bs.anyManual?`<label title="Fallback boost % for hand-added villages that have no detected boost data - synced villages always use their own exact detected amount"><span style="${state.ignoreProdBoost?'':'opacity:.4'}">fallback %:</span> <input type="number" value="${state.prodBoostPct||25}" style="width:50px" ${state.ignoreProdBoost?'':'disabled'} onchange="state.prodBoostPct=+this.value||0;save();renderAll()"></label>`:''}
       <label title="Great Trainer artifact: all villages train in 3/4 of the time (raises troop-village supply needs)"><input type="checkbox" ${state.greatTrainer?'checked':''} onchange="state.greatTrainer=this.checked;save();renderAll()"> Great Trainer</label>
       <label title="Plan a complete route set ignoring your existing routes (Save replaces the optimizer's previous routes). Uncheck to plan only the gap on top of what you already run."><input type="checkbox" ${optFromScratch?'checked':''} onchange="optFromScratch=this.checked;state.optFromScratch=optFromScratch;save();renderOptimizer()"> From scratch</label>
       <label>Server URL: <input type="text" value="${esc(state.serverUrl||'')}" placeholder="https://rof.x2.europe.travian.com" style="width:220px" onchange="state.serverUrl=this.value.trim().replace(/\/+$/,'');detectServerSpeed(state.serverUrl);renderAll()"></label>
@@ -1617,6 +1638,8 @@ function mergeSync(incoming, silent, prune){
     if(ex){
       if(nv.name) ex.name=nv.name;   // adopt the current in-game name
       ex.prod=Object.assign({},ex.prod,nv.prod);
+      if(nv.prodBoost) ex.prodBoost=nv.prodBoost;       // detected per-resource boost amount (/h)
+      if(nv.prodBoostPct) ex.prodBoostPct=nv.prodBoostPct; // detected per-resource boost % (0/15/25)
       ex.warehouse=Object.assign({},ex.warehouse,nv.warehouse);
       ex.granary=Object.assign({},ex.granary,nv.granary);
       ex.tribe=nv.tribe||ex.tribe;
@@ -1639,7 +1662,7 @@ function mergeSync(incoming, silent, prune){
     } else {
       const t=TRIBES[nv.tribe]||TRIBES.Romans;
       state.villages.push({ id:uid(), name:nv.name||"Village", tribe:nv.tribe||"Romans",
-        x:nv.x||0, y:nv.y||0, prod:nv.prod||{}, baseConsumption:nv.baseConsumption||0,
+        x:nv.x||0, y:nv.y||0, prod:nv.prod||{}, prodBoost:nv.prodBoost||null, prodBoostPct:nv.prodBoostPct||null, baseConsumption:nv.baseConsumption||0,
         troops:nv.troops||[], warehouse:nv.warehouse||{}, granary:nv.granary||{},
         merchantCapacity:nv.merchantCapacity||t.merchantCapacity,
         merchantSpeed:nv.merchantSpeed||t.merchantSpeed,

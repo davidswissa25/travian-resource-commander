@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Travian Commander - Pull & Sync bridge
 // @namespace    travian-commander
-// @version      1.7.0
+// @version      1.8.0
 // @description  One-click: a "Pull & Sync" button on the game retrieves every village's tribe, marketplace level, Trade Office level, barracks & stable levels, production, net crop, current resource storages (warehouse/granary stock + capacity), computed merchant capacity and active recurring trade routes, then pushes it straight into the Resource Commander tool (open in another tab) - no console, no file import. Read-only on the game.
 // @author       you
 // @match        *://*.travian.com/*
@@ -105,6 +105,42 @@
       }
       return null;
     }
+    // Same balanced-slice idea but for a {...} object (skips over JSON strings).
+    function sliceObject(str, from) {
+      const s = str.indexOf('{', from); if (s < 0) return null;
+      let d = 0, inStr = false, esc = false;
+      for (let j = s; j < str.length; j++) {
+        const c = str[j];
+        if (inStr) { if (esc) esc = false; else if (c === '\\') esc = true; else if (c === '"') inStr = false; continue; }
+        if (c === '"') inStr = true;
+        else if (c === '{') d++;
+        else if (c === '}') { d--; if (!d) return str.slice(s, j + 1); }
+      }
+      return null;
+    }
+    // production.php ships the per-resource production breakdown inside
+    // Travian.React.ProductionOverview.render({...viewData:{lumber:{...},clay,iron,crop}}, [...]).
+    // Each resource carries its ACTIVE temporary production boost (the +15% ad boost / +25% Gold
+    // boost that can lapse): productionBoostFactor = the % (0 when none), productionBoost = the flat
+    // amount it adds, interimBalanceSheet = the base (pre-boost) production, balanceSheet = the boosted
+    // production (this equals the value in `var resources`). We keep the boost AMOUNT so the tool can
+    // recover exact base production as (synced prod - amount) - no lossy division, and per resource,
+    // since wood/clay/iron and crop can carry different boosts.
+    function extractBoost(html) {
+      const idx = html.indexOf('ProductionOverview.render(');
+      if (idx < 0) return null;
+      const raw = sliceObject(html, idx);
+      if (!raw) return null;
+      let obj; try { obj = JSON.parse(raw); } catch (e) { return null; }
+      const vd = obj && obj.viewData; if (!vd) return null;
+      const pct = {}, amt = {};
+      ['lumber', 'clay', 'iron', 'crop'].forEach(k => {
+        const r = vd[k] || {};
+        pct[k] = +r.productionBoostFactor || 0;   // 0, 15 or 25
+        amt[k] = Math.max(0, +r.productionBoost || 0); // flat /h added by the boost (crop: applies to free crop too)
+      });
+      return { pct, amt };
+    }
     // The marketplace "Trade routes" tab (t=3) ships the full route graph as JSON inside
     // Travian.React.TradeRoutes.render({viewData:{...tradeRoutes:[...]}}). Each destination has a
     // list of scheduled sends. We take the PER-SEND amount and derive the interval from the actual
@@ -178,8 +214,11 @@
       for (let n = 0; n < list.length; n++) {
         const v = list[n];
         if (onProgress) onProgress(n + 1, list.length);
-        const d1 = await getText('/dorf1.php?newdid=' + v.id);
+        // production.php is a superset of dorf1.php: same `var resources` (production/storage/maxStorage)
+        // and village tribeId, PLUS the per-resource production-boost breakdown - so one fetch, no extra request.
+        const d1 = await getText('/production.php?t=lumber&newdid=' + v.id);
         const pm = d1.match(/production:\s*(\{[^}]*\})/); const p = pm ? JSON.parse(pm[1]) : {};
+        const boost = extractBoost(d1); // {pct:{lumber,clay,iron,crop}, amt:{...}} or null
         // current stock + capacity live in the same `resources` object as production
         // (lowercase `storage:` won't match `maxStorage:` thanks to its capital S)
         const stm = d1.match(/storage:\s*(\{[^}]*\})/);    const st = stm ? JSON.parse(stm[1]) : {};
@@ -208,6 +247,8 @@
         villages.push({
           name: v.name, did: v.id, x: v.x, y: v.y, tribe: T.name, synced: true,
           prod: { lumber: p.l1 || 0, clay: p.l2 || 0, iron: p.l3 || 0, crop: l5 },
+          prodBoostPct: boost ? boost.pct : { lumber: 0, clay: 0, iron: 0, crop: 0 }, // active boost % per resource (0=none)
+          prodBoost: boost ? boost.amt : { lumber: 0, clay: 0, iron: 0, crop: 0 },     // flat /h the boost adds -> base = prod - this
           baseConsumption: Math.max(0, l5 - l4),
           warehouse: { capacity: capOf(1), lumber: stock(1), clay: stock(2), iron: stock(3) },
           granary: { capacity: capOf(4), crop: stock(4) },
