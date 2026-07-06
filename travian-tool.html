@@ -728,9 +728,12 @@ function buildAutoPlan(mode){
       if(totalIn>allowed+0.5){ const scale=allowed/totalIn; inn.forEach(r=>r.flow[k]*=scale); }
     });
   });
+  // Min route /h applies to EACH resource independently: stop carrying any resource whose own hourly
+  // flow is below the threshold, then drop the whole route only if nothing worth sending is left.
+  const minH=Math.max(1,optMinRoute);
+  routes.forEach(r=>RES.forEach(k=>{ if((r.flow[k]||0)<minH) r.flow[k]=0; }));
   routes.forEach(r=>{ r.resources={}; RES.forEach(k=>r.resources[k]=Math.round(r.flow[k]*r.interval)); r.tags=[...r.tags]; });
-  // Min route /h: drop any (merged) route whose total hourly flow is below the threshold.
-  routes=routes.filter(r=>{ const flowH=RES.reduce((s,k)=>s+(r.flow[k]||0),0); return flowH>=Math.max(1,optMinRoute) && RES.some(k=>r.resources[k]>=1); });
+  routes=routes.filter(r=>RES.some(k=>r.resources[k]>=1));
   const bySrc={}; routes.forEach(r=>(bySrc[r.from]=bySrc[r.from]||[]).push(r));
   Object.values(bySrc).forEach(list=>list.forEach((r,i)=>r.offsetHours=+((r.interval*i/Math.max(1,list.length)).toFixed(3))));
   // summary
