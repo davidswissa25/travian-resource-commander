@@ -333,6 +333,15 @@ function celebrationDurationH(level, speed){
   const c = level>=10 ? CELEB.great : CELEB.small;
   return c.baseHours * Math.pow(0.964, level-1) / (Math.floor((speed||1)/3)+1);
 }
+// Hours left on the celebration that was actually running when the village was last pulled from the
+// game, computed live from the captured absolute end time (so it keeps counting down after the pull).
+// Returns null when no celebration is running / not synced.
+function celebLeftH(v){
+  const c=v&&v.celebration;
+  if(!c||!c.active) return null;
+  const secs = c.endsAt ? (c.endsAt-Date.now())/1000 : (c.secondsLeft||0);
+  return secs>0 ? secs/3600 : null;
+}
 // Resources/h needed to keep a celebration running back-to-back (0 if no Town Hall).
 function celebrationNeedsPerHour(v){
   const z={lumber:0,clay:0,iron:0,crop:0}, lvl=v.townHallLevel||0;
@@ -676,16 +685,18 @@ function vcard(v,flows){
       ${hasNeeds?`<div style="margin-top:2px">Needs: <span style="color:var(--lumber)">${fmt(needs.lumber)}</span> + <span style="color:var(--clay)">${fmt(needs.clay)}</span> + <span style="color:var(--iron)">${fmt(needs.iron)}</span> /h</div>`:'<div style="color:var(--faint)">Configure troop in Edit to see needs.</div>'}
     </div>`;
   }
+  const celLeft=celebLeftH(v); // hours left on a currently-running celebration (from the game pull), or null
   let celebInfo='';
   if((v.townHallLevel||0)>=1){
     const cn=celebrationNeedsPerHour(v), dur=celebrationDurationH(v.townHallLevel,state.serverSpeed||1), kind=v.townHallLevel>=10?'Great':'Small';
+    const running=celLeft!=null?`<div style="margin-top:2px;color:var(--ok)">&#127881; ${v.celebration&&v.celebration.type==='great'?'Great':'Small'} celebration running now &mdash; <b>${hms(celLeft)} left</b></div>`:'';
     celebInfo=`<div style="font-size:11px;color:var(--dim);margin-top:6px;padding-top:6px;border-top:1px solid var(--line)">
-      &#127881; Town Hall L${v.townHallLevel} &middot; ${kind} celebration every ${hms(dur)}
+      &#127881; Town Hall L${v.townHallLevel} &middot; ${kind} celebration every ${hms(dur)}${running}
       <div style="margin-top:2px">Reserve: <span style="color:var(--lumber)">${fmt(cn.lumber)}</span> + <span style="color:var(--clay)">${fmt(cn.clay)}</span> + <span style="color:var(--iron)">${fmt(cn.iron)}</span> + <span style="color:var(--crop)">${fmt(cn.crop)}</span> /h</div>
     </div>`;
   }
   return `<div class="vcard ${cls}">
-    <div class="vhead"><span class="name">${esc(v.name)}</span><span class="coord">(${v.x||0}|${v.y||0})</span>${v.troopVillage?'<span class="troop-badge">&#9876; Troops</span>':''}${(v.townHallLevel||0)>=1?'<span class="troop-badge">&#127881; TH'+v.townHallLevel+'</span>':''}${v.stillBuilding?'<span class="troop-badge">&#128679; Building</span>':''}<span class="grow"></span><span class="tribe">${esc(v.tribe)}</span></div>
+    <div class="vhead"><span class="name">${esc(v.name)}</span><span class="coord">(${v.x||0}|${v.y||0})</span>${v.troopVillage?'<span class="troop-badge">&#9876; Troops</span>':''}${(v.townHallLevel||0)>=1?'<span class="troop-badge">&#127881; TH'+v.townHallLevel+'</span>':''}${celLeft!=null?'<span class="troop-badge" style="color:var(--ok)" title="Celebration running now">&#127881; '+hms(celLeft)+' left</span>':''}${v.stillBuilding?'<span class="troop-badge">&#128679; Building</span>':''}<span class="grow"></span><span class="tribe">${esc(v.tribe)}</span></div>
     ${clock}
     <div class="bars">${bar("lumber","Lmbr")}${bar("clay","Clay")}${bar("iron","Iron")}${bar("crop","Crop")}</div>
     <div class="vmeta"><span>Net crop: <span class="netcrop" style="color:var(--${net>=0?'ok':'bad'})">${signed(net)}/h</span>${v.synced?'<span class="synced">synced</span>':''}</span><span>Upkeep: ${fmt(consumption(v))}/h</span></div>
@@ -1680,6 +1691,7 @@ function mergeSync(incoming, silent, prune){
       if(nv.stableLevel!=null)   ex.stableLevel=nv.stableLevel;
       if(nv.workshopLevel!=null) ex.workshopLevel=nv.workshopLevel;
       if(nv.townHallLevel!=null) ex.townHallLevel=nv.townHallLevel; // for 24/7 celebration budgeting
+      if(nv.celebration!==undefined) ex.celebration=nv.celebration; // currently-running celebration (or null)
       if(nv.trainable) ex.trainable=nv.trainable; // per-server unit cost + training time (from Barracks/Stable pages)
       if(nv.synced){ ex.synced=true; ex.troops=[]; }
       ex.updatedAt=nv.updatedAt||Date.now();
@@ -1695,7 +1707,7 @@ function mergeSync(incoming, silent, prune){
         merchantCapacityReal:nv.merchantCapacityReal||0, tradeShips:nv.tradeShips||0,
         shipCapacityReal:nv.shipCapacityReal||0,
         troopVillage:false, troopPriority:1,
-        barracksLevel:nv.barracksLevel||0, stableLevel:nv.stableLevel||0, workshopLevel:nv.workshopLevel||0, townHallLevel:nv.townHallLevel||0,
+        barracksLevel:nv.barracksLevel||0, stableLevel:nv.stableLevel||0, workshopLevel:nv.workshopLevel||0, townHallLevel:nv.townHallLevel||0, celebration:nv.celebration||null,
         barracksTroop:null, stableTroop:null, workshopTroop:null, trainable:nv.trainable||[], trainerArtifact:false, stillBuilding:false,
         synced:!!nv.synced, updatedAt:nv.updatedAt||Date.now() });
       added++;

@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Travian Commander - Pull & Sync bridge
 // @namespace    travian-commander
-// @version      1.8.1
+// @version      1.9.0
 // @description  One-click: a "Pull & Sync" button on the game retrieves every village's tribe, marketplace level, Trade Office level, barracks & stable levels, production, net crop, current resource storages (warehouse/granary stock + capacity), computed merchant capacity and active recurring trade routes, then pushes it straight into the Resource Commander tool (open in another tab) - no console, no file import. Read-only on the game.
 // @author       you
 // @match        *://*.travian.com/*
@@ -148,6 +148,23 @@
       });
       return { pct, amt };
     }
+    // Town Hall Celebrations tab (gid=24&t=1): an active celebration is shown in
+    // <table class="under_progress"> with <td class="desc">Great/Small celebration</td> and a
+    // <td class="dur"><span class="timer" ... value="<seconds-left>">. No table => none running.
+    // We scope the parse to that table so the page's other timers (server clock etc.) can't match.
+    function extractCelebration(html) {
+      const t = html.match(/class="under_progress"[\s\S]*?<\/table>/i);
+      if (!t) return null;
+      const seg = t[0];
+      const tm = seg.match(/class="timer"[^>]*\bvalue="(\d+)"/i);
+      if (!tm) return null;
+      const secs = parseInt(tm[1], 10) || 0;
+      if (secs <= 0) return null;
+      const dm = seg.match(/class="desc"[^>]*>([^<]+)</i);
+      const desc = dm ? clean(dm[1]) : '';
+      return { active: true, type: /great/i.test(desc) ? 'great' : 'small',
+        secondsLeft: secs, endsAt: Date.now() + secs * 1000 };
+    }
     // The marketplace "Trade routes" tab (t=3) ships the full route graph as JSON inside
     // Travian.React.TradeRoutes.render({viewData:{...tradeRoutes:[...]}}). Each destination has a
     // list of scheduled sends. We take the PER-SEND amount and derive the interval from the actual
@@ -238,7 +255,9 @@
         const staHtml = await getText('/build.php?gid=20&newdid=' + v.id), sta = lvl(staHtml); // gid 20 = Stable
         const wspHtml = await getText('/build.php?gid=21&newdid=' + v.id), wsp = lvl(wspHtml); // gid 21 = Workshop (rams/catapults)
         const trainable = parseUnits(barHtml, 'barracks').concat(parseUnits(staHtml, 'stable'), parseUnits(wspHtml, 'workshop')); // real per-server unit cost + training time
-        const twn = lvl(await getText('/build.php?gid=24&newdid=' + v.id)); // gid 24 = Town Hall (celebrations)
+        const thHtml = await getText('/build.php?gid=24&t=1&newdid=' + v.id); // gid 24 t=1 = Town Hall, Celebrations tab
+        const twn = lvl(thHtml);
+        const celebration = extractCelebration(thHtml); // {active,type,secondsLeft,endsAt} or null
         const d2 = await getText('/dorf2.php?newdid=' + v.id);
         // tribe: prefer the village's tribeId from the page data (reliable even with no wall built),
         // fall back to the wall CSS class, then Romans.
@@ -261,7 +280,8 @@
           granary: { capacity: capOf(4), crop: stock(4) },
           marketplaceLevel: mkt, tradeOfficeLevel: to, merchantCapacityReal: cap,
           tradeShips: ships, shipCapacityReal: shipCap,
-          barracksLevel: bar, stableLevel: sta, workshopLevel: wsp, townHallLevel: twn, trainable
+          barracksLevel: bar, stableLevel: sta, workshopLevel: wsp, townHallLevel: twn, trainable,
+          celebration // {active,type,secondsLeft,endsAt} or null (null = no celebration running now)
         });
         // recurring "Trade routes" for this village (read-only); active sends only
         const rtHtml = await getText('/build.php?gid=17&t=3&newdid=' + v.id);
