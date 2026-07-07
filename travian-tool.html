@@ -733,7 +733,7 @@ function buildAutoPlan(mode){
       base += ((f0.inn[v.id]&&f0.inn[v.id][k])||0) - ((f0.out[v.id]&&f0.out[v.id][k])||0);
       routes.forEach(r=>{ if(r.from===v.id) base-=r.flow[k]; }); // subtract this plan's own outflow (relay hubs forward what they receive)
       // crop: never push net above 0 (keep granary from filling); l/c/i: allow filling no faster than the horizon
-      const allowed = k==='crop' ? Math.max(0,-base) : (cap>0 ? Math.max(0, (cap-cur)/OVERFILL_HORIZON - base) : totalIn);
+      const allowed = k==='crop' ? Math.max(0,-base)*(v.troopVillage?1+((state.troopCropExtra==null?5:state.troopCropExtra)/100):1) : (cap>0 ? Math.max(0, (cap-cur)/OVERFILL_HORIZON - base) : totalIn);
       if(totalIn>allowed+0.5){ const scale=allowed/totalIn; inn.forEach(r=>r.flow[k]*=scale); }
     });
   });
@@ -843,7 +843,7 @@ function renderOptimizer(){
       <label title="Your synced production already includes any active production boost, detected per resource from the game (+15% from watching ads, or +25% from Gold - either can lapse). Check this to plan on sustainable base production instead: the exact detected amount is stripped from each synced village."><input type="checkbox" ${state.ignoreProdBoost?'checked':''} onchange="state.ignoreProdBoost=this.checked;save();renderAll()"> Ignore production boost</label>
       <span title="What the last game pull detected in your production numbers" style="font-size:11px;color:var(--faint);align-self:center">detected: <b style="color:${bs.active?'var(--accent)':'var(--faint)'}">${esc(bs.text)}</b></span>
       ${bs.anyManual?`<label title="Fallback boost % for hand-added villages that have no detected boost data - synced villages always use their own exact detected amount"><span style="${state.ignoreProdBoost?'':'opacity:.4'}">fallback %:</span> <input type="number" value="${state.prodBoostPct||25}" style="width:50px" ${state.ignoreProdBoost?'':'disabled'} onchange="state.prodBoostPct=+this.value||0;save();renderAll()"></label>`:''}
-      <label title="Extra % crop added on top of each troop village's 24/7 training crop cost, to cover the ongoing upkeep of the troops being produced">Troop crop buffer %: <input type="number" min="0" value="${state.troopCropExtra==null?5:state.troopCropExtra}" style="width:50px" onchange="state.troopCropExtra=Math.max(0,+this.value||0);save();renderAll()"></label>
+      <label title="Extra % crop delivered to each troop village, scaling its whole crop draining — covers the growing upkeep of the troops being produced">Troop crop buffer %: <input type="number" min="0" value="${state.troopCropExtra==null?5:state.troopCropExtra}" style="width:50px" onchange="state.troopCropExtra=Math.max(0,+this.value||0);save();renderAll()"></label>
       <label title="Great Trainer artifact: all villages train in 3/4 of the time (raises troop-village supply needs)"><input type="checkbox" ${state.greatTrainer?'checked':''} onchange="state.greatTrainer=this.checked;save();renderAll()"> Great Trainer</label>
       <label title="Plan a complete route set ignoring your existing routes (Save replaces the optimizer's previous routes). Uncheck to plan only the gap on top of what you already run."><input type="checkbox" ${optFromScratch?'checked':''} onchange="optFromScratch=this.checked;state.optFromScratch=optFromScratch;save();renderOptimizer()"> From scratch</label>
       <label>Server URL: <input type="text" value="${esc(state.serverUrl||'')}" placeholder="https://rof.x2.europe.travian.com" style="width:220px" onchange="state.serverUrl=this.value.trim().replace(/\/+$/,'');detectServerSpeed(state.serverUrl);renderAll()"></label>
@@ -880,7 +880,8 @@ function optimize(){
     carr[v.id]={merch:Math.max(0,maxMerchants(v)-c.merchants), ship:Math.max(0,maxShips(v)-c.ships)}; });
   const wrap=id=>({v:state.villages.find(x=>x.id===id), merchAvail:carr[id].merch, shipAvail:carr[id].ship});
   let donors=data.map(d=>({v:d.v, avail:d.net-keepReserve(d.v).crop})).filter(d=>d.avail>0); // reserve = build buffer only in still-building villages
-  let receivers=data.filter(d=>d.net<0).map(d=>({...d,need:-d.net,eta:d.crop/(-d.net)})).sort((a,b)=>a.eta-b.eta);
+  const cropBuf=1+((state.troopCropExtra==null?5:state.troopCropExtra)/100); // troop villages get extra crop scaling their whole draining (for growing troop upkeep)
+  let receivers=data.filter(d=>d.net<0).map(d=>({...d,need:-d.net*(d.v.troopVillage?cropBuf:1),eta:d.crop/(-d.net)})).sort((a,b)=>a.eta-b.eta);
   const hubs=data.filter(d=>d.net>=0).map(d=>({v:d.v})); // any non-draining village may forward crop on (1 hop)
   const balanced=receivers.length===0, routes=[], unmet=[];
   const hadDonors=donors.length>0, freeCarriers=donors.reduce((s,d)=>s+carr[d.v.id].merch+carr[d.v.id].ship,0);
@@ -1480,7 +1481,6 @@ function troopNeedsPerHour(v){
   const add=name=>{ if(!name) return; const u=list.find(x=>x.name===name); if(!u||!u.seconds) return;
     const rate=3600/(u.seconds*f); RES.forEach(k=>needs[k]+=rate*((u.cost&&u.cost[k])||0)); };
   add(v.barracksTroop); add(v.stableTroop); add(v.workshopTroop);
-  needs.crop *= 1 + ((state.troopCropExtra==null?5:state.troopCropExtra)/100); // buffer: newly-made troops add crop upkeep
   return needs;
 }
 function syncMerchant(){
