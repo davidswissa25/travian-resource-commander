@@ -1,0 +1,17 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>Travian Resource Commander</title>
+  <style>
+    html, body { margin: 0; padding: 0; height: 100%; background: #0f1419; }
+    #app { display: block; border: 0; width: 100%; height: 100vh; }
+  </style>
+</head>
+<body>
+  <!-- The dashboard runs in a sandboxed iframe so its inline scripts work under MV3.
+       dashboard.js bridges chrome.storage <-> the iframe via postMessage. -->
+  <iframe id="app" title="Resource Commander"></iframe>
+  <script src="dashboard.js"></script>
+</body>
+</html>

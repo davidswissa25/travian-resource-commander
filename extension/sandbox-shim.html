@@ -1,0 +1,21 @@
+<!-- Injected right after <body> by build.py. Runs before the tool's own scripts.
+     The sandboxed page has no usable localStorage, so we shim it with an in-memory
+     store seeded from the URL hash (written by dashboard.js) and mirror writes back
+     to the parent, which persists them to chrome.storage.local. -->
+<script>
+(function () {
+  var store = {};
+  try { var h = location.hash.replace(/^#/, ''); if (h) store = JSON.parse(decodeURIComponent(escape(atob(h)))) || {}; } catch (e) {}
+  var flush = function () { try { parent.postMessage({ __tc: 'save', store: store }, '*'); } catch (e) {} };
+  var shim = {
+    getItem: function (k) { k = String(k); return Object.prototype.hasOwnProperty.call(store, k) ? store[k] : null; },
+    setItem: function (k, v) { store[String(k)] = String(v); flush(); },
+    removeItem: function (k) { delete store[String(k)]; flush(); },
+    clear: function () { store = {}; flush(); },
+    key: function (i) { var ks = Object.keys(store); return i < ks.length ? ks[i] : null; }
+  };
+  Object.defineProperty(shim, 'length', { get: function () { return Object.keys(store).length; } });
+  try { Object.defineProperty(window, 'localStorage', { configurable: true, get: function () { return shim; } }); }
+  catch (e) { try { window.localStorage = shim; } catch (e2) {} }
+})();
+</script>

@@ -1,0 +1,14 @@
+<!-- Injected right before </body> by build.py, after the tool has loaded.
+     Receives pulled game data from the parent and feeds it to the tool. -->
+<script>
+window.addEventListener('message', function (ev) {
+  var d = ev && ev.data; if (!d || d.__tc !== 'sync') return;
+  try {
+    if (typeof window.applySyncedData === 'function') {
+      var res = window.applySyncedData(d.payload);
+      parent.postMessage({ __tc: 'synced', res: res }, '*');
+    }
+  } catch (e) { console.warn('[commander] sync failed', e); }
+});
+try { parent.postMessage({ __tc: 'ready' }, '*'); } catch (e) {}
+</script>

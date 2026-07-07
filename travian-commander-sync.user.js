@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Travian Commander - Pull & Sync bridge
 // @namespace    travian-commander
-// @version      1.8.0
+// @version      1.8.1
 // @description  One-click: a "Pull & Sync" button on the game retrieves every village's tribe, marketplace level, Trade Office level, barracks & stable levels, production, net crop, current resource storages (warehouse/granary stock + capacity), computed merchant capacity and active recurring trade routes, then pushes it straight into the Resource Commander tool (open in another tab) - no console, no file import. Read-only on the game.
 // @author       you
 // @match        *://*.travian.com/*
@@ -134,10 +134,17 @@
       let obj; try { obj = JSON.parse(raw); } catch (e) { return null; }
       const vd = obj && obj.viewData; if (!vd) return null;
       const pct = {}, amt = {};
+      // productionBoostFactor/productionBoost are the CONFIGURED boost - present on every resource
+      // even when it is not currently active. The ACTUAL applied boost is balanceSheet minus
+      // interimBalanceSheet (0 for a resource whose ad/Gold boost has lapsed), so each resource is
+      // detected independently - not "+25% on everything" just because the factor is set.
       ['lumber', 'clay', 'iron', 'crop'].forEach(k => {
         const r = vd[k] || {};
-        pct[k] = +r.productionBoostFactor || 0;   // 0, 15 or 25
-        amt[k] = Math.max(0, +r.productionBoost || 0); // flat /h added by the boost (crop: applies to free crop too)
+        const base = +r.interimBalanceSheet || 0;          // pre-boost production
+        const now = +r.balanceSheet || 0;                  // current production (matches `var resources`)
+        const a = Math.max(0, now - base);                 // boost currently applied (0 when inactive)
+        amt[k] = a;
+        pct[k] = (a > 0 && base > 0) ? Math.round((now / base - 1) * 100) : 0;
       });
       return { pct, amt };
     }

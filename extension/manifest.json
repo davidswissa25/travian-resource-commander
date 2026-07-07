@@ -1,0 +1,23 @@
+{
+  "manifest_version": 3,
+  "name": "Travian Resource Commander",
+  "version": "1.0.0",
+  "description": "One-click pull of your Travian villages plus a crop/route optimizer dashboard, in a single extension.",
+  "permissions": ["storage", "tabs"],
+  "host_permissions": ["*://*.travian.com/*"],
+  "background": { "service_worker": "background.js" },
+  "action": { "default_title": "Open Resource Commander" },
+  "content_scripts": [
+    {
+      "matches": ["*://*.travian.com/*"],
+      "js": ["content.js"],
+      "run_at": "document_idle"
+    }
+  ],
+  "sandbox": {
+    "pages": ["tool.html"]
+  },
+  "content_security_policy": {
+    "sandbox": "sandbox allow-scripts allow-forms allow-modals allow-popups allow-downloads; script-src 'self' 'unsafe-inline' 'unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; connect-src 'self' data: blob:"
+  }
+}

@@ -196,10 +196,12 @@
     <button class="active" data-tab="dash" onclick="setTab('dash')">Dashboard</button>
     <button data-tab="optimizer" onclick="setTab('optimizer')">Auto Routes &#9889;</button>
     <button data-tab="routes" onclick="setTab('routes')">Trade Routes</button>
+    <button data-tab="analysis" onclick="setTab('analysis')">Analysis</button>
   </div>
   <section id="tab-dash"></section>
   <section id="tab-optimizer" style="display:none"></section>
   <section id="tab-routes" style="display:none"></section>
+  <section id="tab-analysis" style="display:none"></section>
 </main>
 
 <div class="overlay" id="vOverlay"><div class="modal">
@@ -379,6 +381,7 @@ function normalizeProfile(p, label){
   if(p.defaultMarket==null) p.defaultMarket=0;
   if(p.ignoreProdBoost==null) p.ignoreProdBoost=false; // plan on base production, ignoring the (temporary) gold/ad production boost
   if(p.prodBoostPct==null) p.prodBoostPct=25;
+  if(p.troopCropExtra==null) p.troopCropExtra=5; // % extra crop on troop-training cost (newly-made troops add upkeep)
   ensureIds(p.villages); // backfill missing/duplicate ids so edit & delete always match
   dedupeAndSort(p);      // remove rename-duplicates (same coords) and order by village number
   return p;
@@ -529,11 +532,17 @@ function boostSummary(){
   const parts=Object.keys(byPct).map(Number).sort((a,b)=>a-b).map(pc=>`+${pc}% ${[...byPct[pc]].join('/')}`);
   return { text: parts.length?parts.join(', '):(anyData?'none active':'no data'), active:parts.length>0, anyManual };
 }
-// Set a troop village's supply priority straight from the Auto Routes summary (1 = supplied first),
-// then re-run the optimizer so the plan reflects the new order.
-function setTroopPriority(vid, val){
-  const v=state.villages.find(x=>x.id===vid); if(!v) return;
-  v.troopPriority=Math.max(1, Math.round(+val||1)); save(); renderOptimizer();
+// Drag-to-reorder troop-village supply priority on the Auto Routes page (1 = supplied first).
+let troopDragId=null;
+function troopDrag(ev,vid){ troopDragId=vid; try{ev.dataTransfer.effectAllowed='move';}catch(e){} }
+function troopDrop(ev,vid){ ev.preventDefault();
+  const from=troopDragId; troopDragId=null;
+  if(!from||from===vid) return;
+  const vs=state.villages.filter(v=>v.troopVillage).sort((a,b)=>(a.troopPriority||1)-(b.troopPriority||1));
+  const f=vs.findIndex(v=>v.id===from), t=vs.findIndex(v=>v.id===vid);
+  if(f<0||t<0) return;
+  const [m]=vs.splice(f,1); vs.splice(t,0,m);
+  vs.forEach((v,i)=>v.troopPriority=i+1); save(); renderOptimizer();
 }
 function effSpeed(v){ return (v.merchantSpeed||16)*(state.serverSpeed||1)*bonusMult(); }
 function effCap(v){
@@ -634,7 +643,7 @@ function renderCmd(){
 function renderDash(){
   const el=document.getElementById("tab-dash");
   if(!state.villages.length){ el.innerHTML=`<div class="empty"><h3>No villages yet</h3><p>Add a village manually, use Paste from game, or Import / Sync.</p><button class="primary" onclick="openVillage()">+ Add village</button></div>`; return; }
-  const flows=routeFlows();
+  const flows={inn:{},out:{}}; // dashboard shows RAW production, before trade routes (see Analysis tab for post-route)
   el.innerHTML=`<div class="vgrid">${state.villages.map(v=>vcard(v,flows)).join("")}</div>`;
 }
 function vcard(v,flows){
@@ -658,7 +667,7 @@ function vcard(v,flows){
     const sInfo=v.stableLevel?`Stable L${v.stableLevel}${v.stableTroop?' &middot; '+esc(v.stableTroop):''}`:null;
     const wInfo=v.workshopLevel?`Workshop L${v.workshopLevel}${v.workshopTroop?' &middot; '+esc(v.workshopTroop):''}`:null;
     const bldg=[bInfo,sInfo,wInfo].filter(Boolean).join(' &nbsp;|&nbsp; ');
-    const pri=v.troopPriority&&v.troopPriority>1?` &middot; Priority ${v.troopPriority}`:'';
+    const pri=''; // supply priority is shown/edited only on the Auto Routes page
     const trn=(v.trainerArtifact||state.greatTrainer)?` &middot; <span style="color:var(--accent)">Trainer &times;${trainerFactor(v)}</span>`:'';
     troopInfo=`<div style="font-size:11px;color:var(--dim);margin-top:6px;padding-top:6px;border-top:1px solid var(--line)">
       ${bldg?`<div>${bldg}${pri}${trn}</div>`:''}
@@ -760,7 +769,7 @@ function renderUnified(plan){
   let troopTable='';
   if(troopVils.length){
     const tot={lumber:0,clay:0,iron:0,crop:0};
-    const rows=troopVils.map(v=>{
+    const rows=troopVils.map((v,idx)=>{
       const inn=(io[v.id]&&io[v.id].in)||{lumber:0,clay:0,iron:0,crop:0}, need=troopNeedsPerHour(v);
       const avail=k=>prodBase(v,k)+(inn[k]||0); // own production + incoming routes
       RES.forEach(k=>tot[k]+=avail(k));
@@ -773,9 +782,9 @@ function renderUnified(plan){
         if(netk>0.5 && cap>0){ const e=(cap-cur)/netk; if(e<fill) fill=e; } });
       const fillCell = fill===Infinity ? '<span style="color:var(--faint)">&mdash;</span>'
         : `<span style="color:var(--${fill<WAREHOUSE_FILL_H?'bad':fill<24?'warn':'ok'})">${hms(fill)}</span>`;
-      return `<tr><td><input type="number" min="1" value="${v.troopPriority||1}" title="Supply priority — 1 is supplied first. Edit to reorder." style="width:42px" onchange="setTroopPriority('${v.id}',this.value)"> ${esc(v.name)}</td>${lci}<td class="num" style="color:var(--crop)">${fmt(avail('crop'))}</td><td class="num">${fillCell}</td></tr>`;
+      return `<tr draggable="true" ondragstart="troopDrag(event,'${v.id}')" ondragover="event.preventDefault()" ondrop="troopDrop(event,'${v.id}')" style="cursor:grab"><td><span style="color:var(--faint)" title="Drag to reorder supply priority">&#9776;</span> <b style="color:var(--accent)">${idx+1}</b> ${esc(v.name)}</td>${lci}<td class="num" style="color:var(--crop)">${fmt(avail('crop'))}${need.crop>=1?' <span style="color:var(--faint)">/ '+fmt(need.crop)+' train</span>':''}</td><td class="num">${fillCell}</td></tr>`;
     }).join('');
-    troopTable=`<div style="margin-bottom:16px"><b>&#9876; Supply at troop villages /h</b> <span class="note" style="margin:0">&mdash; own production + incoming <span style="color:var(--faint)">/ 24&#8260;7 training need</span>; warehouse fill = soonest of L/C/I if <b>not</b> training; edit <b>#</b> to reorder supply priority</span>
+    troopTable=`<div style="margin-bottom:16px"><b>&#9876; Supply at troop villages /h</b> <span class="note" style="margin:0">&mdash; own production + incoming <span style="color:var(--faint)">/ 24&#8260;7 training need</span>; warehouse fill = soonest of L/C/I if <b>not</b> training; <b>drag rows</b> to reorder supply priority</span>
       <table style="margin-top:6px"><thead><tr><th>Troop village</th><th class="num">Lumber</th><th class="num">Clay</th><th class="num">Iron</th><th class="num">Crop</th><th class="num">Warehouse fills</th></tr></thead><tbody>
       ${rows}<tr style="font-weight:650"><td>Total</td><td class="num" style="color:var(--lumber)">${fmt(tot.lumber)}</td><td class="num" style="color:var(--clay)">${fmt(tot.clay)}</td><td class="num" style="color:var(--iron)">${fmt(tot.iron)}</td><td class="num" style="color:var(--crop)">${fmt(tot.crop)}</td><td></td></tr></tbody></table></div>`;
   }
@@ -834,6 +843,7 @@ function renderOptimizer(){
       <label title="Your synced production already includes any active production boost, detected per resource from the game (+15% from watching ads, or +25% from Gold - either can lapse). Check this to plan on sustainable base production instead: the exact detected amount is stripped from each synced village."><input type="checkbox" ${state.ignoreProdBoost?'checked':''} onchange="state.ignoreProdBoost=this.checked;save();renderAll()"> Ignore production boost</label>
       <span title="What the last game pull detected in your production numbers" style="font-size:11px;color:var(--faint);align-self:center">detected: <b style="color:${bs.active?'var(--accent)':'var(--faint)'}">${esc(bs.text)}</b></span>
       ${bs.anyManual?`<label title="Fallback boost % for hand-added villages that have no detected boost data - synced villages always use their own exact detected amount"><span style="${state.ignoreProdBoost?'':'opacity:.4'}">fallback %:</span> <input type="number" value="${state.prodBoostPct||25}" style="width:50px" ${state.ignoreProdBoost?'':'disabled'} onchange="state.prodBoostPct=+this.value||0;save();renderAll()"></label>`:''}
+      <label title="Extra % crop added on top of each troop village's 24/7 training crop cost, to cover the ongoing upkeep of the troops being produced">Troop crop buffer %: <input type="number" min="0" value="${state.troopCropExtra==null?5:state.troopCropExtra}" style="width:50px" onchange="state.troopCropExtra=Math.max(0,+this.value||0);save();renderAll()"></label>
       <label title="Great Trainer artifact: all villages train in 3/4 of the time (raises troop-village supply needs)"><input type="checkbox" ${state.greatTrainer?'checked':''} onchange="state.greatTrainer=this.checked;save();renderAll()"> Great Trainer</label>
       <label title="Plan a complete route set ignoring your existing routes (Save replaces the optimizer's previous routes). Uncheck to plan only the gap on top of what you already run."><input type="checkbox" ${optFromScratch?'checked':''} onchange="optFromScratch=this.checked;state.optFromScratch=optFromScratch;save();renderOptimizer()"> From scratch</label>
       <label>Server URL: <input type="text" value="${esc(state.serverUrl||'')}" placeholder="https://rof.x2.europe.travian.com" style="width:220px" onchange="state.serverUrl=this.value.trim().replace(/\/+$/,'');detectServerSpeed(state.serverUrl);renderAll()"></label>
@@ -1325,9 +1335,10 @@ function applyOverflowPlan(){
 function balanceRow(v,flows){
   const inn=flows.inn[v.id]||{}, out=flows.out[v.id]||{};
   const p=projected(v,flows), cells=RES.map(k=>{
-    let base=prodBase(v,k); if(k==="crop") base-=consumption(v);
+    const train=(k==="crop"&&v.troopVillage)?troopNeedsPerHour(v).crop:0; // Analysis excludes troop-training crop
+    let base=prodBase(v,k); if(k==="crop") base-=(consumption(v)-train);
     const rawNet=base+(inn[k]||0)-(out[k]||0); // net BEFORE the outgoing cap - tells if sending is what flattens it
-    const net=p.net[k], cur=p.cur[k], cap=p.cap[k]||0; let tag, col="ok", eta=Infinity;
+    const net=p.net[k]+train, cur=p.cur[k], cap=p.cap[k]||0; let tag, col="ok", eta=Infinity;
     if(net<-0.5){ eta=cur/(-net); col=eta<6?"bad":"warn"; tag="empty in "+hms(eta); }
     else if(net>0.5){
       if(cap>0 && cur>=cap){ col="bad"; tag="overflowing"; }
@@ -1341,39 +1352,46 @@ function balanceRow(v,flows){
   const worst=cells.reduce((a,b)=>(b.col==="bad"?2:b.col==="warn"?1:0)>(a.col==="bad"?2:a.col==="warn"?1:0)?b:a,cells[0]);
   return {v,cells,worst};
 }
-function renderBalance(){
-  if(state.villages.length<1) return "";
+// Own tab: per-resource net across ALL villages, with active trade routes applied and
+// troop-training cost excluded (net = production - crop upkeep + route in/out).
+function renderAnalysis(){
+  const el=document.getElementById("tab-analysis"); if(!el) return;
+  if(state.villages.length<1){ el.innerHTML=`<div class="empty"><h3>No villages yet</h3><p>Add or sync villages first.</p></div>`; return; }
   const flows=routeFlows();
   const rows=state.villages.map(v=>balanceRow(v,flows));
+  const per=balancePer===24?24:1, unit=per===24?"/24h":"/h";
+  const tot={lumber:0,clay:0,iron:0,crop:0};
+  rows.forEach(r=>r.cells.forEach(c=>tot[c.k]+=c.net));
   const deficits=rows.filter(r=>r.cells.some(c=>c.net<-0.5)).length;
   const overflows=rows.filter(r=>r.cells.some(c=>c.tag.indexOf("full")===0||c.tag==="overflowing")).length;
-  const per=balancePer===24?24:1, unit=per===24?"/24h":"/h"; // ETAs are unaffected; only the rate label scales
   const body=rows.sort((a,b)=>Math.min(...a.cells.map(c=>c.eta))-Math.min(...b.cells.map(c=>c.eta))).map(r=>{
     const tds=r.cells.map(c=>`<td class="num" style="color:var(--${c.col})">${signed(c.net*per)}<div class="sub" style="font-size:11px;opacity:.85">${c.tag}</div></td>`).join("");
     const badge=r.v.troopVillage?'<span class="troop-badge">&#9876;</span>':'';
     return `<tr><td>${esc(r.v.name)} ${badge}</td>${tds}</tr>`;
   }).join("");
+  const totCell=k=>`<td class="num" style="color:var(--${tot[k]>=0?'ok':'bad'})">${signed(tot[k]*per)}</td>`;
   const btn=(p,lbl)=>`<button class="sm${per===p?' primary':''}" onclick="setBalancePer(${p})">${lbl}</button>`;
-  return `<div style="margin-bottom:16px">
-    <div style="display:flex;gap:18px;align-items:baseline;margin-bottom:8px">
-      <b>Balance analysis</b>
-      <span class="note" style="margin:0">${deficits} village(s) draining &middot; ${overflows} nearing overflow &mdash; with active routes applied</span>
+  el.innerHTML=`
+    <div style="display:flex;gap:18px;align-items:baseline;margin-bottom:10px">
+      <b>Villages analysis</b>
+      <span class="note" style="margin:0">Net per resource across all villages &mdash; with active trade routes applied, troop-training cost excluded. ${deficits} draining &middot; ${overflows} nearing overflow.</span>
       <span style="margin-left:auto;display:inline-flex;gap:4px;align-items:center"><span class="note" style="margin:0">Show rate:</span>${btn(1,"per 1h")}${btn(24,"per 24h")}</span>
     </div>
+    <table style="margin-bottom:20px"><thead><tr><th>Account total ${unit}</th><th class="num">Lumber</th><th class="num">Clay</th><th class="num">Iron</th><th class="num">Crop</th></tr></thead>
+    <tbody><tr style="font-weight:650"><td>All villages</td>${totCell('lumber')}${totCell('clay')}${totCell('iron')}${totCell('crop')}</tr></tbody></table>
     <table><thead><tr><th>Village</th><th class="num">Lumber ${unit}</th><th class="num">Clay ${unit}</th><th class="num">Iron ${unit}</th><th class="num">Crop ${unit}</th></tr></thead>
-    <tbody>${body}</tbody></table></div>`;
+    <tbody>${body}</tbody></table>`;
 }
-function setBalancePer(p){ balancePer = (p===24?24:1); renderRoutes(); }
+function setBalancePer(p){ balancePer = (p===24?24:1); renderAll(); }
 
 /* ---- routes tab ---- */
 function renderRoutes(){
   const el=document.getElementById("tab-routes");
   const head=`<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px"><p class="note" style="margin:0">Flow = <code>resources &divide; interval</code>, shown per the rate window selected above. Routes feed dashboard projections.</p><button class="primary" onclick="openRoute()" ${state.villages.length<2?'disabled':''}>+ Route</button></div>`;
-  const analysis=renderBalance();
-  if(!state.routes.length){ el.innerHTML=head+analysis+`<div class="empty"><h3>No routes</h3><p>Add one manually, sync them from the game, or let <b>Auto Routes &#9889;</b> build a crop-balancing plan.</p></div>`; return; }
+  if(!state.routes.length){ el.innerHTML=head+`<div class="empty"><h3>No routes</h3><p>Add one manually, sync them from the game, or let <b>Auto Routes &#9889;</b> build a crop-balancing plan.</p></div>`; return; }
   const name=id=>{ const v=state.villages.find(v=>v.id===id); return v?v.name:"?"; };
   const per=balancePer===24?24:1, unit=per===24?"/24h":"/h"; // flow columns follow the same toggle
-  el.innerHTML=head+analysis+`<table><thead><tr><th>From</th><th>To</th><th class="num">Lumber ${unit}</th><th class="num">Clay ${unit}</th><th class="num">Iron ${unit}</th><th class="num">Crop ${unit}</th><th class="num">Interval</th><th class="num">Merchants</th><th></th></tr></thead><tbody>
+  el.innerHTML=head+`<table><thead><tr><th>From</th><th>To</th><th class="num">Lumber ${unit}</th><th class="num">Clay ${unit}</th><th class="num">Iron ${unit}</th><th class="num">Crop ${unit}</th><th class="num">Interval</th><th class="num">Merchants</th><th></th></tr></thead><tbody>
   ${state.routes.map(r=>{ const fl=k=>(r.resources&&r.resources[k]||0)/(r.intervalHours||1)*per; // resources / interval, scaled to the window
     return `<tr><td>${esc(name(r.from))}</td><td>${esc(name(r.to))}</td><td class="num">${fmt(fl("lumber"))}</td><td class="num">${fmt(fl("clay"))}</td><td class="num">${fmt(fl("iron"))}</td><td class="num" style="color:var(--crop)">${fmt(fl("crop"))}</td><td class="num">${per}h</td><td class="num">${r.merchants||"&mdash;"} ${r.auto?'<span class="pill ok">auto</span>':''}</td><td class="num">${(()=>{const sl=sendLink(state.villages.find(v=>v.id===r.from),state.villages.find(v=>v.id===r.to),(r.resources&&r.resources.crop)||0);return sl?'<a href="'+sl+'" target="_blank" style="color:var(--accent);margin-right:6px">Send</a>':'';})()}<button class="sm" onclick="openRoute('${r.id}')">&#9998;</button> <button class="sm danger" onclick="delRoute('${r.id}')">&#10005;</button></td></tr>`;
   }).join("")}</tbody></table>`;
@@ -1393,9 +1411,7 @@ function openVillage(id){
     <div class="field full"><label style="display:flex;align-items:center;gap:8px;cursor:pointer"><input type="checkbox" id="f_building" ${v.stillBuilding?'checked':''}> <span>Still building &mdash; keep the Build buffer (${fmt(optMargin)}/h) of each resource here (not shipped away)</span></label></div>
     <div class="field full"><label style="display:flex;align-items:center;gap:8px;cursor:pointer"><input type="checkbox" id="f_troop" ${v.troopVillage?'checked':''} onchange="document.getElementById('troopConfig').style.display=this.checked?'contents':'none'"> <span>Troop-making village &mdash; receives resources from surplus villages to sustain 24/7 training</span></label></div>
     <div id="troopConfig" style="display:${v.troopVillage?'contents':'none'}">
-      <div class="sect">Troop Production &mdash; 24/7 barracks &amp; stable supply</div>
-      <div class="field"><label>Priority (1 = first supplied)</label><input type="number" id="f_priority" min="1" value="${v.troopPriority||1}"></div>
-      <div class="field"></div>
+      <div class="sect">Troop Production &mdash; 24/7 barracks &amp; stable supply <span class="note" style="margin:0">(supply priority: drag rows on the Auto Routes page)</span></div>
       <div class="field"><label>Barracks level (auto-fetched on pull)</label><input type="number" id="f_bar_lvl" min="0" max="20" value="${v.barracksLevel||''}" placeholder="0" oninput="updateTroopNeeds()"></div>
       <div class="field"><label>Train in barracks</label><select id="f_bar_troop" onchange="updateTroopNeeds()">${troopOptionsHTML(v.trainable,'barracks',v.barracksTroop)}</select></div>
       <div class="field"><label>Stable level (auto-fetched on pull)</label><input type="number" id="f_sta_lvl" min="0" max="20" value="${v.stableLevel||''}" placeholder="0" oninput="updateTroopNeeds()"></div>
@@ -1464,6 +1480,7 @@ function troopNeedsPerHour(v){
   const add=name=>{ if(!name) return; const u=list.find(x=>x.name===name); if(!u||!u.seconds) return;
     const rate=3600/(u.seconds*f); RES.forEach(k=>needs[k]+=rate*((u.cost&&u.cost[k])||0)); };
   add(v.barracksTroop); add(v.stableTroop); add(v.workshopTroop);
+  needs.crop *= 1 + ((state.troopCropExtra==null?5:state.troopCropExtra)/100); // buffer: newly-made troops add crop upkeep
   return needs;
 }
 function syncMerchant(){
@@ -1506,7 +1523,7 @@ function saveVillage(){
     merchantCapacity:num("f_mcap"),merchantSpeed:num("f_mspd"),tradeOfficeLevel:num("f_to"),marketplaceLevel:num("f_mkt"),
     tradeShips:num("f_ships"),
     troopVillage:!!document.getElementById("f_troop").checked,
-    troopPriority:num("f_priority")||1,
+    troopPriority:(editingV&&editingV.troopPriority)||1,
     barracksLevel:+(document.getElementById("f_bar_lvl").value)||0,
     barracksTroop:document.getElementById("f_bar_troop").value||null,
     stableLevel:+(document.getElementById("f_sta_lvl").value)||0,
@@ -1816,7 +1833,7 @@ function importPaste(){ if(!pasteResults.length) return; mergeSync(pasteResults)
 function setTab(t){
   tab=t;
   document.querySelectorAll(".tabs button").forEach(b=>b.classList.toggle("active",b.dataset.tab===t));
-  ["dash","optimizer","routes"].forEach(x=>document.getElementById("tab-"+x).style.display=x===t?"block":"none");
+  ["dash","optimizer","routes","analysis"].forEach(x=>document.getElementById("tab-"+x).style.display=x===t?"block":"none");
   renderAll();
 }
 function renderAll(){
@@ -1825,6 +1842,7 @@ function renderAll(){
   if(tab==="dash") renderDash();
   else if(tab==="optimizer") renderOptimizer();
   else if(tab==="routes") renderRoutes();
+  else if(tab==="analysis") renderAnalysis();
 }
 loadOptSettings();
 renderAll();
