@@ -745,8 +745,12 @@ function buildAutoPlan(mode){
       if(k!=='crop' && v.troopVillage) base-=troopNeedsPerHour(v)[k]||0; // troop training consumes l/c/i, freeing room for inflow
       base += ((f0.inn[v.id]&&f0.inn[v.id][k])||0) - ((f0.out[v.id]&&f0.out[v.id][k])||0);
       routes.forEach(r=>{ if(r.from===v.id) base-=r.flow[k]; }); // subtract this plan's own outflow (relay hubs forward what they receive)
-      // crop: never push net above 0 (keep granary from filling); l/c/i: allow filling no faster than the horizon
-      const allowed = k==='crop' ? Math.max(0,-base)*(v.troopVillage?1+((state.troopCropExtra==null?5:state.troopCropExtra)/100):1) : (cap>0 ? Math.max(0, (cap-cur)/OVERFILL_HORIZON - base) : totalIn);
+      // crop: never push net above 0 (keep granary from filling). l/c/i: allow filling no faster than
+      // the horizon - but troop villages are the intended dump for surplus lumber/clay/iron, so they
+      // may fill at the faster WAREHOUSE_FILL_H rate (they burn it on training + buildings), letting all
+      // non-reserved surplus be forwarded there instead of sitting in the donor.
+      const hz = (k!=='crop' && v.troopVillage) ? WAREHOUSE_FILL_H : OVERFILL_HORIZON;
+      const allowed = k==='crop' ? Math.max(0,-base)*(v.troopVillage?1+((state.troopCropExtra==null?5:state.troopCropExtra)/100):1) : (cap>0 ? Math.max(0, (cap-cur)/hz - base) : totalIn);
       if(totalIn>allowed+0.5){ const scale=allowed/totalIn; inn.forEach(r=>r.flow[k]*=scale); }
     });
   });
@@ -1249,6 +1253,10 @@ function optimizeOverflow(cropPlan, troopPlan){
   // l/c/i per hour each donor already sends via the troop-supply plan, so we don't double-spend surplus.
   const usedByTroop={};
   ((troopPlan&&troopPlan.routes)||[]).forEach(r=>{ const e=usedByTroop[r.from]||(usedByTroop[r.from]={lumber:0,clay:0,iron:0}); nonCrop.forEach(k=>e[k]+=(r.resources[k]||0)/(r.interval||1)); });
+  // l/c/i per hour already arriving at each troop village from the troop-supply plan (receiver side),
+  // so a troop village's remaining training "burn" capacity can also soak up surplus, not just storage.
+  const troopIn={};
+  ((troopPlan&&troopPlan.routes)||[]).forEach(r=>{ const e=troopIn[r.to]||(troopIn[r.to]={lumber:0,clay:0,iron:0}); nonCrop.forEach(k=>e[k]+=(r.resources[k]||0)/(r.interval||1)); });
   const troopVils=state.villages.filter(v=>v.troopVillage).sort((a,b)=>(a.troopPriority||1)-(b.troopPriority||1));
   const routes=[]; let anyDonor=false; const anyRecv=troopVils.length>0; const urgent=new Set();
   nonCrop.forEach(k=>{
@@ -1262,10 +1270,15 @@ function optimizeOverflow(cropPlan, troopPlan){
       const eta = net>0.5 && cap>0 ? (cap-cur)/net : Infinity;
       return {v, give:Math.max(0, net-res-ut), eta};
     }).filter(d=>d.give>0.5).sort((a,b)=>a.eta-b.eta);
-    // Receivers: troop villages (priority order). Cap the overflow RATE so its warehouse can't fill
-    // in under 8h (while training, the extra inflow beyond the training need is what accumulates).
+    // Receivers: troop villages (priority order). Each can soak up (a) any 24/7 training burn the
+    // troop-supply plan couldn't feed (own production + its routes fall short) - sustainable, it's
+    // consumed - plus (b) storage room capped so the warehouse can't fill in under WAREHOUSE_FILL_H.
     const receivers=troopVils.map(v=>{ const p=proj[v.id], cap=p.cap[k]||0, cur=p.cur[k];
-      return {v, rate:Math.max(0,(cap-cur)/WAREHOUSE_FILL_H)};
+      const burn=troopNeedsPerHour(v)[k]||0, own=prodBase(v,k);
+      const inEx=(flows.inn[v.id]&&flows.inn[v.id][k])||0, inTr=(troopIn[v.id]&&troopIn[v.id][k])||0;
+      const sink=Math.max(0, burn-own-inEx-inTr);            // training capacity still unfed after troop-supply
+      const storage=cap>0?Math.max(0,(cap-cur)/WAREHOUSE_FILL_H):Infinity;
+      return {v, rate:sink+storage};
     }).filter(r=>r.rate>0.5);
     if(donors.length) anyDonor=true;
     donors.forEach(d=>{
