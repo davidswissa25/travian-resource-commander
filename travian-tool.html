@@ -696,7 +696,7 @@ function vcard(v,flows){
     </div>`;
   }
   return `<div class="vcard ${cls}">
-    <div class="vhead"><span class="name">${esc(v.name)}</span><span class="coord">(${v.x||0}|${v.y||0})</span>${v.troopVillage?'<span class="troop-badge">&#9876; Troops</span>':''}${(v.townHallLevel||0)>=1?'<span class="troop-badge">&#127881; TH'+v.townHallLevel+'</span>':''}${celLeft!=null?'<span class="troop-badge" style="color:var(--ok)" title="Celebration running now">&#127881; '+hms(celLeft)+' left</span>':''}${v.stillBuilding?'<span class="troop-badge">&#128679; Building</span>':''}<span class="grow"></span><span class="tribe">${esc(v.tribe)}</span></div>
+    <div class="vhead"><span class="name">${esc(v.name)}</span><span class="coord">(${v.x||0}|${v.y||0})</span>${v.capital?'<span class="troop-badge" title="Capital — its crop is donated last">&#128081; Capital</span>':''}${v.troopVillage?'<span class="troop-badge">&#9876; Troops</span>':''}${(v.townHallLevel||0)>=1?'<span class="troop-badge">&#127881; TH'+v.townHallLevel+'</span>':''}${celLeft!=null?'<span class="troop-badge" style="color:var(--ok)" title="Celebration running now">&#127881; '+hms(celLeft)+' left</span>':''}${v.stillBuilding?'<span class="troop-badge">&#128679; Building</span>':''}<span class="grow"></span><span class="tribe">${esc(v.tribe)}</span></div>
     ${clock}
     <div class="bars">${bar("lumber","Lmbr")}${bar("clay","Clay")}${bar("iron","Iron")}${bar("crop","Crop")}</div>
     <div class="vmeta"><span>Net crop: <span class="netcrop" style="color:var(--${net>=0?'ok':'bad'})">${signed(net)}/h</span>${v.synced?'<span class="synced">synced</span>':''}</span><span>Upkeep: ${fmt(consumption(v))}/h</span></div>
@@ -972,15 +972,20 @@ function optimize(){
         relay:c.kind==="relay"?leg.relay:null,impact});
     });
   }
+  // The capital (if one is marked) is a crop donor of LAST RESORT: cover each draining village from
+  // the other (non-capital) support villages first, and only tap the capital's own crop if they
+  // can't finish the job. (Using the capital as a relay HUB is fine - forwarding doesn't spend its crop.)
   receivers.forEach(R=>{
     let need=R.need;
     while(need>1){
       let best=null;
       const consider=c=>{ if(c && (c.F>=optMinRoute || c.F>=need-1) && (!best||better(c,best))) best=c; };
-      donors.forEach(D=>{ if(D.avail<=0.5) return;
+      const scan=fromCapital=>{ donors.forEach(D=>{ if(D.avail<=0.5 || !!D.v.capital!==fromCapital) return;
         consider(directCand(D,R,need));
         hubs.forEach(H=>{ if(H.v.id!==D.v.id && H.v.id!==R.v.id && carr[H.v.id].merch+carr[H.v.id].ship>0) consider(relayCand(D,H,R,need)); });
-      });
+      }); };
+      scan(false);            // non-capital support villages first
+      if(!best) scan(true);   // capital only if nothing else can help
       if(!best || best.F<1) break;                 // nothing can make progress
       const covered=(need-best.F)<=1;
       commitCand(best,covered);
@@ -1422,6 +1427,7 @@ function openVillage(id){
     <div class="field"><label>Tribe</label><select id="f_tribe" onchange="syncMerchant()">${Object.keys(TRIBES).map(x=>`<option ${v.tribe===x?'selected':''}>${x}</option>`).join("")}</select></div>
     <div class="field"><label>Coordinates X | Y</label><div style="display:flex;gap:6px"><input type="number" id="f_x" value="${v.x==null?'':v.x}" placeholder="X" style="width:50%"><input type="number" id="f_y" value="${v.y==null?'':v.y}" placeholder="Y" style="width:50%"></div></div>
     <div class="field full"><label style="display:flex;align-items:center;gap:8px;cursor:pointer"><input type="checkbox" id="f_building" ${v.stillBuilding?'checked':''}> <span>Still building &mdash; keep the Build buffer (${fmt(optMargin)}/h) of each resource here (not shipped away)</span></label></div>
+    <div class="field full"><label style="display:flex;align-items:center;gap:8px;cursor:pointer"><input type="checkbox" id="f_capital" ${v.capital?'checked':''}> <span>&#128081; Capital &mdash; its crop is donated <b>last</b>: other support villages give crop first, and the capital only if they can&rsquo;t cover it (only one village can be the capital)</span></label></div>
     <div class="field full"><label style="display:flex;align-items:center;gap:8px;cursor:pointer"><input type="checkbox" id="f_troop" ${v.troopVillage?'checked':''} onchange="document.getElementById('troopConfig').style.display=this.checked?'contents':'none'"> <span>Troop-making village &mdash; receives resources from surplus villages to sustain 24/7 training</span></label></div>
     <div id="troopConfig" style="display:${v.troopVillage?'contents':'none'}">
       <div class="sect">Troop Production &mdash; 24/7 barracks &amp; stable supply <span class="note" style="margin:0">(supply priority: drag rows on the Auto Routes page)</span></div>
@@ -1545,10 +1551,12 @@ function saveVillage(){
     townHallLevel:+(document.getElementById("f_th").value)||0,
     trainerArtifact:!!document.getElementById("f_trainer").checked,
     stillBuilding:!!document.getElementById("f_building").checked,
+    capital:!!document.getElementById("f_capital").checked, // crop donor of last resort
     trainable:editingV?editingV.trainable:[],
     synced:editingV?editingV.synced:false, did:editingV?editingV.did:0, updatedAt:Date.now() };
   if(editingV){ const i=state.villages.findIndex(x=>x.id===v.id); state.villages[i]=v; }
   else state.villages.push(v);
+  if(v.capital) state.villages.forEach(x=>{ if(x.id!==v.id) x.capital=false; }); // only one capital
   save(); closeVillage(); renderAll();
 }
 function delVillage(id){
