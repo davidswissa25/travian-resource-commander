@@ -389,7 +389,6 @@ function normalizeProfile(p, label){
   if(p.allianceBonus==null) p.allianceBonus=0;
   if(p.defaultMarket==null) p.defaultMarket=0;
   if(p.ignoreProdBoost==null) p.ignoreProdBoost=false; // plan on base production, ignoring the (temporary) gold/ad production boost
-  if(p.prodBoostPct==null) p.prodBoostPct=25;
   if(p.troopCropExtra==null) p.troopCropExtra=5; // % extra crop on troop-training cost (newly-made troops add upkeep)
   ensureIds(p.villages); // backfill missing/duplicate ids so edit & delete always match
   dedupeAndSort(p);      // remove rename-duplicates (same coords) and order by village number
@@ -527,21 +526,20 @@ function bonusMult(){ return 1+((state.allianceBonus||0)/100); }
 function prodBase(v,k){
   const p=(v&&v.prod&&v.prod[k])||0;
   if(!state.ignoreProdBoost) return p;
-  if(v && v.prodBoost && v.prodBoost[k]!=null) return Math.max(0, p-(+v.prodBoost[k]||0)); // exact, detected amount
-  return p/(1+((state.prodBoostPct||25)/100)); // fallback for un-synced villages
+  // strip only the exact boost detected from the game; villages with no detected data are left as-is
+  return (v && v.prodBoost && v.prodBoost[k]!=null) ? Math.max(0, p-(+v.prodBoost[k]||0)) : p;
 }
 // What the last sync actually detected in the production data, so the user can see whether the
 // pulled numbers include a boost and which one (15 or 25%) before choosing to ignore it. Boosts
 // can differ per resource (e.g. +15% wood/clay/iron from ads, +25% crop from Gold).
 function boostSummary(){
   const LBL={lumber:'wood',clay:'clay',iron:'iron',crop:'crop'};
-  const byPct={}; let anyData=false, anyManual=false;
+  const byPct={}; let anyData=false;
   state.villages.forEach(v=>{
     if(v.prodBoostPct){ anyData=true; RES.forEach(k=>{ const pc=+v.prodBoostPct[k]||0; if(pc>0)(byPct[pc]=byPct[pc]||new Set()).add(LBL[k]); }); }
-    else anyManual=true; // hand-added village with no detected boost data
   });
   const parts=Object.keys(byPct).map(Number).sort((a,b)=>a-b).map(pc=>`+${pc}% ${[...byPct[pc]].join('/')}`);
-  return { text: parts.length?parts.join(', '):(anyData?'none active':'no data'), active:parts.length>0, anyManual };
+  return { text: parts.length?parts.join(', '):(anyData?'none active':'no data'), active:parts.length>0 };
 }
 // Drag-to-reorder troop-village supply priority on the Auto Routes page (1 = supplied first).
 let troopDragId=null;
@@ -859,7 +857,6 @@ function renderOptimizer(){
       <label title="Alliance commerce bonus % applied to merchant capacity & speed (used only for villages without a game-synced real capacity)">Alliance trade %: <input type="number" value="${state.allianceBonus||0}" style="width:60px" onchange="state.allianceBonus=+this.value||0;save();renderAll()"></label>
       <label title="Your synced production already includes any active production boost, detected per resource from the game (+15% from watching ads, or +25% from Gold - either can lapse). Check this to plan on sustainable base production instead: the exact detected amount is stripped from each synced village."><input type="checkbox" ${state.ignoreProdBoost?'checked':''} onchange="state.ignoreProdBoost=this.checked;save();renderAll()"> Ignore production boost</label>
       <span title="What the last game pull detected in your production numbers" style="font-size:11px;color:var(--faint);align-self:center">detected: <b style="color:${bs.active?'var(--accent)':'var(--faint)'}">${esc(bs.text)}</b></span>
-      ${bs.anyManual?`<label title="Fallback boost % for hand-added villages that have no detected boost data - synced villages always use their own exact detected amount"><span style="${state.ignoreProdBoost?'':'opacity:.4'}">fallback %:</span> <input type="number" value="${state.prodBoostPct||25}" style="width:50px" ${state.ignoreProdBoost?'':'disabled'} onchange="state.prodBoostPct=+this.value||0;save();renderAll()"></label>`:''}
       <label title="Extra % crop delivered to each troop village, scaling its whole crop draining — covers the growing upkeep of the troops being produced">Troop crop buffer %: <input type="number" min="0" value="${state.troopCropExtra==null?5:state.troopCropExtra}" style="width:50px" onchange="state.troopCropExtra=Math.max(0,+this.value||0);save();renderAll()"></label>
       <label title="Great Trainer artifact: all villages train in 3/4 of the time (raises troop-village supply needs)"><input type="checkbox" ${state.greatTrainer?'checked':''} onchange="state.greatTrainer=this.checked;save();renderAll()"> Great Trainer</label>
       <label title="Plan a complete route set ignoring your existing routes (Save replaces the optimizer's previous routes). Uncheck to plan only the gap on top of what you already run."><input type="checkbox" ${optFromScratch?'checked':''} onchange="optFromScratch=this.checked;state.optFromScratch=optFromScratch;save();renderOptimizer()"> From scratch</label>
