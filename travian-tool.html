@@ -1461,18 +1461,23 @@ function renderAnalysis(){
   const troopVils=state.villages.filter(v=>v.troopVillage).sort((a,b)=>(a.troopPriority||1)-(b.troopPriority||1));
   let troopHtml='';
   if(troopVils.length){
-    const nc=["lumber","clay","iron"];
+    const nc=["lumber","clay","iron"], near=0.9, sev={ok:0,warn:1,bad:2}; // within 10% short = yellow (warn), not red
     const rowsT=troopVils.map(v=>{
       const inn=flows.inn[v.id]||{}, out=flows.out[v.id]||{}, need=troopNeedsPerHour(v);
       const cells=nc.map(k=>{ const have=prodBase(v,k)+(inn[k]||0)-(out[k]||0), req=need[k]||0;
-        return {k, have, req, ok: req<0.5 || have>=req-0.5}; });
-      const netCrop=projected(v,flows).net.crop, cropOk=netCrop>=-0.5;
-      const allOk=cells.every(c=>c.ok)&&cropOk;
-      const tds=cells.map(c=>`<td class="num" style="color:var(--${c.ok?'ok':'bad'})">${fmt(c.have*per)}<span style="opacity:.55"> / ${fmt(c.req*per)}</span></td>`).join("");
-      return `<tr><td>&#9876; ${esc(v.name)} <span style="opacity:.55">#${v.troopPriority||1}</span></td>${tds}<td class="num" style="color:var(--${cropOk?'ok':'bad'})">${signed(netCrop*per)}</td><td>${allOk?'<span style="color:var(--ok)">&#10003; fulfilled</span>':'<span style="color:var(--bad)">&#9888; short</span>'}</td></tr>`;
+        const col=(req<0.5||have>=req-0.5)?'ok':(have>=req*near?'warn':'bad');
+        return {k, have, req, col}; });
+      const netCrop=projected(v,flows).net.crop, cropTol=Math.max(100, 0.05*prodBase(v,'crop'));
+      const cropCol=netCrop>=-0.5?'ok':(netCrop>=-cropTol?'warn':'bad');
+      const worst=[...cells.map(c=>c.col),cropCol].reduce((a,b)=>sev[b]>sev[a]?b:a,'ok');
+      const status=worst==='ok'?'<span style="color:var(--ok)">&#10003; fulfilled</span>'
+                 :worst==='warn'?'<span style="color:var(--warn)">&#9888; slightly short</span>'
+                 :'<span style="color:var(--bad)">&#9888; short</span>';
+      const tds=cells.map(c=>`<td class="num" style="color:var(--${c.col})">${fmt(c.have*per)}<span style="opacity:.55"> / ${fmt(c.req*per)}</span></td>`).join("");
+      return `<tr><td>&#9876; ${esc(v.name)} <span style="opacity:.55">#${v.troopPriority||1}</span></td>${tds}<td class="num" style="color:var(--${cropCol})">${signed(netCrop*per)}</td><td>${status}</td></tr>`;
     }).join("");
-    troopHtml=`<div style="margin-top:22px;margin-bottom:6px"><b>&#9876; Troop village supply</b> <span class="note" style="margin:0">&mdash; delivered (own production + active routes) <b>/ required</b> ${unit}; red = shortfall.</span></div>
-      <table><thead><tr><th>Troop village</th><th class="num">Lumber</th><th class="num">Clay</th><th class="num">Iron</th><th class="num">Crop net</th><th>Status</th></tr></thead><tbody>${rowsT}</tbody></table>`;
+    troopHtml=`<div style="margin-bottom:6px"><b>&#9876; Troop village supply</b> <span class="note" style="margin:0">&mdash; delivered (own production + active routes) <b>/ required</b> ${unit}; yellow = within 10% short, red = shortfall.</span></div>
+      <table style="margin-bottom:22px"><thead><tr><th>Troop village</th><th class="num">Lumber</th><th class="num">Clay</th><th class="num">Iron</th><th class="num">Crop net</th><th>Status</th></tr></thead><tbody>${rowsT}</tbody></table>`;
   }
   el.innerHTML=`
     <div style="display:flex;gap:18px;align-items:baseline;margin-bottom:10px">
@@ -1480,11 +1485,11 @@ function renderAnalysis(){
       <span class="note" style="margin:0">Net per resource across all villages &mdash; with active trade routes applied, troop-training cost excluded. ${deficits} draining &middot; ${overflows} nearing overflow.</span>
       <span style="margin-left:auto;display:inline-flex;gap:4px;align-items:center"><span class="note" style="margin:0">Show rate:</span>${btn(1,"per 1h")}${btn(24,"per 24h")}</span>
     </div>
+    ${troopHtml}
     <table style="margin-bottom:20px"><thead><tr><th>Account total ${unit}</th><th class="num">Lumber</th><th class="num">Clay</th><th class="num">Iron</th><th class="num">Crop</th></tr></thead>
     <tbody><tr style="font-weight:650"><td>All villages</td>${totCell('lumber')}${totCell('clay')}${totCell('iron')}${totCell('crop')}</tr></tbody></table>
     <table><thead><tr><th>Village</th><th class="num">Lumber ${unit}</th><th class="num">Clay ${unit}</th><th class="num">Iron ${unit}</th><th class="num">Crop ${unit}</th></tr></thead>
-    <tbody>${body}</tbody></table>
-    ${troopHtml}`;
+    <tbody>${body}</tbody></table>`;
 }
 function setBalancePer(p){ balancePer = (p===24?24:1); renderAll(); }
 
