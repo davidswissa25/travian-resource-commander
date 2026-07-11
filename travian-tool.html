@@ -481,13 +481,32 @@ function troopUpkeep(v){ return (v.troops||[]).reduce((s,t)=>s+(t.count||0)*(t.u
 // shouldn't drag account net crop or the starvation clock negative.
 function consumption(v){ return (v.baseConsumption||0)+troopUpkeep(v)+celebrationNeedsPerHour(v).crop; }
 function routeFlows(){
+  const byId={}; state.villages.forEach(v=>byId[v.id]=v);
+  // Nominal hourly flow each route requests.
+  const rts=state.routes.map(r=>{ const iv=r.intervalHours>0?r.intervalHours:1; const ph={};
+    RES.forEach(k=>ph[k]=(r.resources&&r.resources[k]||0)/iv); return {from:r.from,to:r.to,d:{...ph}}; });
+  // A route can't deliver more of a resource than its source actually SUSTAINS: own production surplus
+  // (minus its crop upkeep) plus what it genuinely receives. Scale each source's outgoing down to that,
+  // and repeat so a relay that loses inflow also loses what it can forward (converges in a few passes).
+  // Without this, an over-provisioned in-game route would phantom-cover a village that is really starving.
+  for(let iter=0; iter<5; iter++){
+    const inn={}, out={};
+    state.villages.forEach(v=>{ inn[v.id]={lumber:0,clay:0,iron:0,crop:0}; out[v.id]={lumber:0,clay:0,iron:0,crop:0}; });
+    rts.forEach(r=>RES.forEach(k=>{ if(inn[r.to])inn[r.to][k]+=r.d[k]; if(out[r.from])out[r.from][k]+=r.d[k]; }));
+    let changed=false;
+    state.villages.forEach(v=>{
+      RES.forEach(k=>{
+        let avail=prodBase(v,k)+inn[v.id][k]; if(k==='crop') avail-=consumption(v);
+        avail=Math.max(0,avail);
+        const tot=out[v.id][k];
+        if(tot>avail+0.01){ const scale=avail/tot; rts.forEach(r=>{ if(r.from===v.id) r.d[k]*=scale; }); changed=true; }
+      });
+    });
+    if(!changed) break;
+  }
   const inn={}, out={};
   state.villages.forEach(v=>{ inn[v.id]={lumber:0,clay:0,iron:0,crop:0}; out[v.id]={lumber:0,clay:0,iron:0,crop:0}; });
-  state.routes.forEach(r=>{
-    const interval = r.intervalHours>0 ? r.intervalHours : 1;
-    RES.forEach(k=>{ const perH=(r.resources&&r.resources[k]||0)/interval;
-      if(out[r.from]) out[r.from][k]+=perH; if(inn[r.to]) inn[r.to][k]+=perH; });
-  });
+  rts.forEach(r=>RES.forEach(k=>{ if(out[r.from]) out[r.from][k]+=r.d[k]; if(inn[r.to]) inn[r.to][k]+=r.d[k]; }));
   return {inn,out};
 }
 function netRates(v, flows){
