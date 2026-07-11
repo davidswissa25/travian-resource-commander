@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Travian Commander - Pull & Sync bridge
 // @namespace    travian-commander
-// @version      1.9.0
+// @version      1.10.0
 // @description  One-click: a "Pull & Sync" button on the game retrieves every village's tribe, marketplace level, Trade Office level, barracks & stable levels, production, net crop, current resource storages (warehouse/granary stock + capacity), computed merchant capacity and active recurring trade routes, then pushes it straight into the Resource Commander tool (open in another tab) - no console, no file import. Read-only on the game.
 // @author       you
 // @match        *://*.travian.com/*
@@ -165,6 +165,27 @@
       return { active: true, type: /great/i.test(desc) ? 'great' : 'small',
         secondsLeft: secs, endsAt: Date.now() + secs * 1000 };
     }
+    // Treasury page (gid=27&newdid=X) - village-contextual: the "ancient power activated for THIS village"
+    // is the power X currently has running. We look in <table class="show_artefacts"> for a Trainer power
+    // (name contains "trainer") whose row is marked "activated for this village" - that means the viewed
+    // village X trains faster. The .info cell gives the scope: "Effect Village" (only X) vs "Effect all
+    // villages" (every village); the bonus (1/2, 1/3) gives the factor. Returns {scope,factor} for the
+    // trainer active in THIS village, or null. Defensive: never throws; villages with no Treasury redirect
+    // to dorf2 (no show_artefacts) -> null.
+    function extractTrainer(html) {
+      if (!/show_artefacts/.test(html)) return null; // not a Treasury page (redirected / no treasury here)
+      let doc; try { doc = new DOMParser().parseFromString(html, 'text/html'); } catch (e) { return null; }
+      let best = null;
+      doc.querySelectorAll('table.show_artefacts tr').forEach(tr => {
+        const txt = clean(tr.textContent);
+        if (!/trainer/i.test(txt)) return;                                   // trainer power only
+        if (!/activated for this village/i.test(txt)) return;                // running for THIS village (idle/other rows skipped)
+        const factor = /1\s*\/\s*3/.test(txt) ? 3 : 2;                       // (1/2) -> half, (1/3) -> a third
+        const scope = /all villages/i.test(txt) ? 'all' : 'village';         // "Effect all villages" vs "Effect Village"
+        if (!best || (scope === 'all' && best.scope !== 'all')) best = { active: true, scope: scope, factor: factor };
+      });
+      return best;
+    }
     // The marketplace "Trade routes" tab (t=3) ships the full route graph as JSON inside
     // Travian.React.TradeRoutes.render({viewData:{...tradeRoutes:[...]}}). Each destination has a
     // list of scheduled sends. We take the PER-SEND amount and derive the interval from the actual
@@ -235,6 +256,7 @@
       let playerId = 0;
 
       const villages = [], routes = [];
+      let allTrainer = null; // set to {factor} if an "all villages" Trainer power is active (affects every village)
       for (let n = 0; n < list.length; n++) {
         const v = list[n];
         if (onProgress) onProgress(n + 1, list.length);
@@ -269,9 +291,15 @@
         const sm = harbor.match(/trade ?ship[^()]*\(\s*in service\s*(\d+)/i);
         const ships = sm ? +sm[1] : 0;
         const shipCap = ships > 0 ? await readShipCap(v.id) : 0;
+        // Treasury (gid=27) for THIS village: the trainer power "activated for this village" (if any) tells
+        // us this village trains faster. A Village-scope trainer is attributed to this village; an all-scope
+        // one is remembered and stamped on every village after the loop.
+        const tre = extractTrainer(await getText('/build.php?gid=27&newdid=' + v.id));
+        if (tre && tre.scope === 'all') allTrainer = { factor: tre.factor };
         const l4 = p.l4 || 0, l5 = p.l5 || 0;
         villages.push({
           name: v.name, did: v.id, x: v.x, y: v.y, tribe: T.name, synced: true,
+          trainerActive: !!(tre && tre.scope === 'village'), trainerFactor: (tre && tre.factor) || 2, // small Trainer running in THIS village (overwritten below if an all-villages one is active)
           prod: { lumber: p.l1 || 0, clay: p.l2 || 0, iron: p.l3 || 0, crop: l5 },
           prodBoostPct: boost ? boost.pct : { lumber: 0, clay: 0, iron: 0, crop: 0 }, // active boost % per resource (0=none)
           prodBoost: boost ? boost.amt : { lumber: 0, clay: 0, iron: 0, crop: 0 },     // flat /h the boost adds -> base = prod - this
@@ -289,7 +317,9 @@
         if (!player) { const m = rtHtml.match(/class="playerName"[^>]*>\s*([^<]+?)\s*</); if (m) player = clean(m[1]); }
         extractTradeRoutes(rtHtml).forEach(r => routes.push(r));
       }
-      const account = { server: location.host, serverName, player, playerId };
+      // An "all villages" Trainer power shortens training everywhere, so stamp every village.
+      if (allTrainer) villages.forEach(vv => { vv.trainerActive = true; vv.trainerFactor = allTrainer.factor; });
+      const account = { server: location.host, serverName, player, playerId, trainer: allTrainer ? { scope: 'all', factor: allTrainer.factor } : null };
       if (list[0]) await getText('/dorf1.php?newdid=' + list[0].id); // restore active village
       villages.sort((a, b) => String(a.name).localeCompare(String(b.name), undefined, { numeric: true, sensitivity: 'base' }));
       return { villages, routes, account };

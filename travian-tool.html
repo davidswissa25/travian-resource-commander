@@ -389,6 +389,7 @@ function normalizeProfile(p, label){
   if(p.allianceBonus==null) p.allianceBonus=0;
   if(p.defaultMarket==null) p.defaultMarket=0;
   if(p.ignoreProdBoost==null) p.ignoreProdBoost=false; // plan on base production, ignoring the (temporary) gold/ad production boost
+  if(p.ignoreHeroProd==null) p.ignoreHeroProd=false; // plan without the hero's resource production (the hero can move/die/be reassigned)
   if(p.troopCropExtra==null) p.troopCropExtra=5; // % extra crop on troop-training cost (newly-made troops add upkeep)
   ensureIds(p.villages); // backfill missing/duplicate ids so edit & delete always match
   dedupeAndSort(p);      // remove rename-duplicates (same coords) and order by village number
@@ -524,10 +525,12 @@ function bonusMult(){ return 1+((state.allianceBonus||0)/100); }
 // The sync now captures the EXACT flat amount each boost adds (v.prodBoost[k]) -> base = prod - amount,
 // per resource. Villages added by hand (no boost data) fall back to the manual % division.
 function prodBase(v,k){
-  const p=(v&&v.prod&&v.prod[k])||0;
-  if(!state.ignoreProdBoost) return p;
-  // strip only the exact boost detected from the game; villages with no detected data are left as-is
-  return (v && v.prodBoost && v.prodBoost[k]!=null) ? Math.max(0, p-(+v.prodBoost[k]||0)) : p;
+  let p=(v&&v.prod&&v.prod[k])||0;
+  // strip the exact boost detected from the game; villages with no detected data are left as-is
+  if(state.ignoreProdBoost && v && v.prodBoost && v.prodBoost[k]!=null) p=Math.max(0, p-(+v.prodBoost[k]||0));
+  // strip the hero's resource production (it's temporary - the hero can move/die/be reassigned)
+  if(state.ignoreHeroProd && v && v.heroProd && v.heroProd[k]) p=Math.max(0, p-(+v.heroProd[k]||0));
+  return p;
 }
 // What the last sync actually detected in the production data, so the user can see whether the
 // pulled numbers include a boost and which one (15 or 25%) before choosing to ignore it. Boosts
@@ -677,7 +680,7 @@ function vcard(v,flows){
     const wInfo=v.workshopLevel?`Workshop L${v.workshopLevel}${v.workshopTroop?' &middot; '+esc(v.workshopTroop):''}`:null;
     const bldg=[bInfo,sInfo,wInfo].filter(Boolean).join(' &nbsp;|&nbsp; ');
     const pri=''; // supply priority is shown/edited only on the Auto Routes page
-    const trn=(v.trainerArtifact||state.greatTrainer)?` &middot; <span style="color:var(--accent)">Trainer &times;${trainerFactor(v)}</span>`:'';
+    const trn='';
     troopInfo=`<div style="font-size:11px;color:var(--dim);margin-top:6px;padding-top:6px;border-top:1px solid var(--line)">
       ${bldg?`<div>${bldg}${pri}${trn}</div>`:''}
       ${hasNeeds?`<div style="margin-top:2px">Needs: <span style="color:var(--lumber)">${fmt(needs.lumber)}</span> + <span style="color:var(--clay)">${fmt(needs.clay)}</span> + <span style="color:var(--iron)">${fmt(needs.iron)}</span> /h</div>`:'<div style="color:var(--faint)">Configure troop in Edit to see needs.</div>'}
@@ -688,8 +691,11 @@ function vcard(v,flows){
   if((v.townHallLevel||0)>=1){
     const cn=celebrationNeedsPerHour(v), dur=celebrationDurationH(v.townHallLevel,state.serverSpeed||1), kind=v.townHallLevel>=10?'Great':'Small';
     const running=celLeft!=null?`<div style="margin-top:2px;color:var(--ok)">&#127881; ${v.celebration&&v.celebration.type==='great'?'Great':'Small'} celebration running now &mdash; <b>${hms(celLeft)} left</b></div>`:'';
+    // No celebration running -> offer a jump straight to this village's Town Hall (Celebrations tab) to start one
+    const thLink=(state.serverUrl&&v.did)?state.serverUrl.replace(/\/+$/,"")+"/build.php?gid=24&t=1&newdid="+v.did:"";
+    const notRunning=celLeft==null?`<div style="margin-top:2px;color:var(--warn)">&#9888; No celebration running${thLink?` &middot; <a href="${thLink}" target="_blank" style="color:var(--accent)">Start one in Town Hall &#8599;</a>`:''}</div>`:'';
     celebInfo=`<div style="font-size:11px;color:var(--dim);margin-top:6px;padding-top:6px;border-top:1px solid var(--line)">
-      &#127881; Town Hall L${v.townHallLevel} &middot; ${kind} celebration every ${hms(dur)}${running}
+      &#127881; Town Hall L${v.townHallLevel} &middot; ${kind} celebration every ${hms(dur)}${running}${notRunning}
       <div style="margin-top:2px">Reserve: <span style="color:var(--lumber)">${fmt(cn.lumber)}</span> + <span style="color:var(--clay)">${fmt(cn.clay)}</span> + <span style="color:var(--iron)">${fmt(cn.iron)}</span> + <span style="color:var(--crop)">${fmt(cn.crop)}</span> /h</div>
     </div>`;
   }
@@ -716,7 +722,10 @@ function buildAutoPlan(mode){
   const merged={};
   const addRoute=(r,tag)=>{
     const iv=snapInterval(r.interval||r.intervalHours||1);
-    const key=r.from+">"+r.to;
+    // Key by carrier kind too: a route is merchants OR ships, so a ship route to the same pair is a
+    // SEPARATE route and must not merge with a merchant one into a mixed-carrier row.
+    const kind=(r.ships||0)>0 && !(r.merchants>0) ? "ship" : "merch";
+    const key=r.from+">"+r.to+">"+kind;
     const m=merged[key]||(merged[key]={from:r.from,to:r.to,fromName:r.fromName,toName:r.toName,
       flow:{lumber:0,clay:0,iron:0,crop:0},interval:iv,merchants:0,ships:0,distance:r.distance||0,tags:new Set(),relay:null});
     if(r.resources) RES.forEach(k=>m.flow[k]+=(r.resources[k]||0)/iv);
@@ -748,14 +757,18 @@ function buildAutoPlan(mode){
       // may fill at the faster WAREHOUSE_FILL_H rate (they burn it on training + buildings), letting all
       // non-reserved surplus be forwarded there instead of sitting in the donor.
       const hz = (k!=='crop' && v.troopVillage) ? WAREHOUSE_FILL_H : OVERFILL_HORIZON;
-      const allowed = k==='crop' ? Math.max(0,-base)*(v.troopVillage?1+((state.troopCropExtra==null?5:state.troopCropExtra)/100):1) : (cap>0 ? Math.max(0, (cap-cur)/hz - base) : totalIn);
+      // The capital is the intended dump for excess crop when "send excess crop to capital" is on, so
+      // let its granary fill over the horizon instead of the usual "keep crop net <= 0" cap.
+      const capCollect = k==='crop' && v.capital && state.cropToCapital;
+      const allowed = (k==='crop' && !capCollect) ? Math.max(0,-base)*(v.troopVillage?1+((state.troopCropExtra==null?5:state.troopCropExtra)/100):1) : (cap>0 ? Math.max(0, (cap-cur)/hz - base) : totalIn);
       if(totalIn>allowed+0.5){ const scale=allowed/totalIn; inn.forEach(r=>r.flow[k]*=scale); }
     });
   });
-  // Min route /h applies to EACH resource independently: stop carrying any resource whose own hourly
-  // flow is below the threshold, then drop the whole route only if nothing worth sending is left.
+  // Min route /h applies to the WHOLE route (all resource types summed), NOT each type on its own:
+  // a route carrying e.g. 150 lumber + 150 clay + 150 iron (450/h total) is kept even though no
+  // single type reaches the threshold. Only routes whose total hourly flow is below the min are dropped.
   const minH=Math.max(1,optMinRoute);
-  routes.forEach(r=>RES.forEach(k=>{ if((r.flow[k]||0)<minH) r.flow[k]=0; }));
+  routes=routes.filter(r=>RES.reduce((s,k)=>s+(r.flow[k]||0),0)>=minH);
   routes.forEach(r=>{ r.resources={}; RES.forEach(k=>r.resources[k]=Math.round(r.flow[k]*r.interval)); r.tags=[...r.tags]; });
   routes=routes.filter(r=>RES.some(k=>r.resources[k]>=1));
   const bySrc={}; routes.forEach(r=>(bySrc[r.from]=bySrc[r.from]||[]).push(r));
@@ -856,9 +869,11 @@ function renderOptimizer(){
       <label title="Auto-detected from the server name (e.g. x2)">Server speed: <b style="color:var(--accent);margin-left:4px">&times;${state.serverSpeed||1}</b></label>
       <label title="Alliance commerce bonus % applied to merchant capacity & speed (used only for villages without a game-synced real capacity)">Alliance trade %: <input type="number" value="${state.allianceBonus||0}" style="width:60px" onchange="state.allianceBonus=+this.value||0;save();renderAll()"></label>
       <label title="Your synced production already includes any active production boost, detected per resource from the game (+15% from watching ads, or +25% from Gold - either can lapse). Check this to plan on sustainable base production instead: the exact detected amount is stripped from each synced village."><input type="checkbox" ${state.ignoreProdBoost?'checked':''} onchange="state.ignoreProdBoost=this.checked;save();renderAll()"> Ignore production boost</label>
+      <label title="The hero's resource production is added to whatever village it currently sits in. Check this to plan without it (the hero can move, die, or be reassigned) - set each hero village's Hero production /h in its Edit form."><input type="checkbox" ${state.ignoreHeroProd?'checked':''} onchange="state.ignoreHeroProd=this.checked;save();renderAll()"> Ignore hero production</label>
       <span title="What the last game pull detected in your production numbers" style="font-size:11px;color:var(--faint);align-self:center">detected: <b style="color:${bs.active?'var(--accent)':'var(--faint)'}">${esc(bs.text)}</b></span>
       <label title="Extra % crop delivered to each troop village, scaling its whole crop draining — covers the growing upkeep of the troops being produced">Troop crop buffer %: <input type="number" min="0" value="${state.troopCropExtra==null?5:state.troopCropExtra}" style="width:50px" onchange="state.troopCropExtra=Math.max(0,+this.value||0);save();renderAll()"></label>
-      <label title="Great Trainer artifact: all villages train in 3/4 of the time (raises troop-village supply needs)"><input type="checkbox" ${state.greatTrainer?'checked':''} onchange="state.greatTrainer=this.checked;save();renderAll()"> Great Trainer</label>
+      <label title="After covering every crop deficit, ship each village's leftover surplus crop to the Capital (fills its granary). The capital stops donating crop while this is on. Mark a Capital in a village's Edit form."><input type="checkbox" ${state.cropToCapital?'checked':''} onchange="state.cropToCapital=this.checked;save();renderAll()"> Send excess crop to capital</label>
+      <span class="note" style="margin:0" title="A Trainer artifact is detected from the Treasury on Pull & Sync and normalizes each village's training time. Per troop village you can override it (plan with/without the trainer) in that village's Edit form.">Trainer artifact: detected from Treasury &middot; per-village override in Edit</span>
       <label title="Plan a complete route set ignoring your existing routes (Save replaces the optimizer's previous routes). Uncheck to plan only the gap on top of what you already run."><input type="checkbox" ${optFromScratch?'checked':''} onchange="optFromScratch=this.checked;state.optFromScratch=optFromScratch;save();renderOptimizer()"> From scratch</label>
       <label>Server URL: <input type="text" value="${esc(state.serverUrl||'')}" placeholder="https://rof.x2.europe.travian.com" style="width:220px" onchange="state.serverUrl=this.value.trim().replace(/\/+$/,'');detectServerSpeed(state.serverUrl);renderAll()"></label>
       <div class="grow"></div>
@@ -893,10 +908,13 @@ function optimize(){
   const carr={}; state.villages.forEach(v=>{ const c=committed[v.id]||{merchants:0,ships:0};
     carr[v.id]={merch:Math.max(0,maxMerchants(v)-c.merchants), ship:Math.max(0,maxShips(v)-c.ships)}; });
   const wrap=id=>({v:state.villages.find(x=>x.id===id), merchAvail:carr[id].merch, shipAvail:carr[id].ship});
-  let donors=data.map(d=>({v:d.v, avail:d.net-keepReserve(d.v).crop})).filter(d=>d.avail>0); // reserve = build buffer only in still-building villages
+  let donors=data.map(d=>({v:d.v, avail:d.net-keepReserve(d.v).crop})).filter(d=>d.avail>0 && !d.v.troopVillage && !(state.cropToCapital && d.v.capital)); // troop villages never donate crop; when collecting excess to the capital, the capital isn't a donor either
   const cropBuf=1+((state.troopCropExtra==null?5:state.troopCropExtra)/100); // troop villages get extra crop scaling their whole draining (for growing troop upkeep)
   let receivers=data.filter(d=>d.net<0).map(d=>({...d,need:-d.net*(d.v.troopVillage?cropBuf:1),eta:d.crop/(-d.net)})).sort((a,b)=>a.eta-b.eta);
-  const hubs=data.filter(d=>d.net>=0).map(d=>({v:d.v})); // any non-draining village may forward crop on (1 hop)
+  // Relay hubs forward crop on (1 hop). If any village is marked a crop transport hub, ONLY those
+  // are used - so crop funnels through your ship-rich hub instead of ad-hoc relays everywhere.
+  const anyHub=state.villages.some(v=>v.cropHub);
+  const hubs=data.filter(d=>d.net>=0 && (anyHub ? d.v.cropHub : true)).map(d=>({v:d.v}));
   const balanced=receivers.length===0, routes=[], unmet=[];
   const hadDonors=donors.length>0, freeCarriers=donors.reduce((s,d)=>s+carr[d.v.id].merch+carr[d.v.id].ship,0);
   // Batch model: send "perSend" crop every "interval" h. Interval is as long as possible
@@ -913,8 +931,11 @@ function optimize(){
   }
   // Fill a flow target from a donor's fleets (richest carrier first), respecting whole-hour
   // intervals and per-fleet availability. Returns delivered crop/h plus carriers tied up.
-  function allocate(d,dst,rec,target){
-    const fleets=donorFleets(d,dst);
+  function allocate(d,dst,rec,target,onlyKind){
+    // A single trade route uses merchants (marketplace) OR trade ships (harbor) - never both. onlyKind
+    // restricts this allocation to one fleet type so the emitted route carries only that carrier.
+    const fleets=donorFleets(d,dst).filter(f=> !onlyKind || (onlyKind==="ship" ? f.kind==="ship" : f.kind!=="ship"));
+    if(!fleets.length) return {F:0,I:1,mUsed:0,sUsed:0,capped:false,roundTrip:Infinity};
     const Tfast=fleets.reduce((m,f)=>Math.min(m,f.T), Infinity);
     const I=chooseInterval(Tfast, rec.crop/Math.max(1,rec.need), rec.capRoom, target);
     let remaining=target, F=0, mUsed=0, sUsed=0, capped=false;
@@ -930,30 +951,40 @@ function optimize(){
     }
     return {F, I, mUsed, sUsed, capped, roundTrip:Tfast};
   }
+  // Pick the single fleet kind (merchants OR ships) that delivers the most for this leg, so no route
+  // ever mixes carriers. Ties broken by fewer carriers used.
+  function bestAlloc(d,dst,rec,target){
+    let best=null;
+    ["merchant","ship"].forEach(kind=>{ const a=allocate(d,dst,rec,target,kind);
+      if(a.F<0.5) return;
+      if(!best || a.F>best.F+0.5 || (Math.abs(a.F-best.F)<=0.5 && (a.mUsed+a.sUsed)<(best.mUsed+best.sUsed))) best=a; });
+    return best || {F:0,I:1,mUsed:0,sUsed:0,capped:false,roundTrip:Infinity};
+  }
   // ---- candidate supply paths: direct donor->receiver, or relayed donor->hub->receiver (1 hop) ----
   // Relaying lets a far donor hand crop to a nearby hub that finishes the trip with ITS own spare
   // carriers (e.g. a coastal village's idle trade ships) - covering deficits a direct route can't,
   // and sparing the donor's fleet for other villages.
   function directCand(D,R,need){
-    const dst=dist(D.v,R.v), a=allocate(wrap(D.v.id),dst,R,Math.min(need,D.avail));
+    const dst=dist(D.v,R.v), a=bestAlloc(wrap(D.v.id),dst,R,Math.min(need,D.avail));
     if(a.F<1) return null;
-    return {F:a.F,dCarr:a.mUsed+a.sUsed,totCarr:a.mUsed+a.sUsed,maxDist:dst,kind:"direct",srcId:D.v.id,
+    return {F:a.F,dCarr:a.mUsed+a.sUsed,totCarr:a.mUsed+a.sUsed,maxDist:dst,kind:"direct",srcId:D.v.id,srcCapital:!!D.v.capital,
       legs:[{fromId:D.v.id,toV:R.v,a,dst}]};
   }
   function relayCand(D,H,R,need){
     const sink={v:H.v,crop:1e12,need:1e-6,capRoom:1e12}; // hub forwards crop on, so its granary doesn't bound the interval
-    const d1=dist(D.v,H.v), p=allocate(wrap(D.v.id),d1,sink,Math.min(need,D.avail));
+    const d1=dist(D.v,H.v), p=bestAlloc(wrap(D.v.id),d1,sink,Math.min(need,D.avail));
     if(p.F<optMinRoute) return null;                              // first leg can't move a worthwhile amount
-    const d2=dist(H.v,R.v), a2=allocate(wrap(H.v.id),d2,R,Math.min(p.F,need));
+    const d2=dist(H.v,R.v), a2=bestAlloc(wrap(H.v.id),d2,R,Math.min(p.F,need));
     if(a2.F<1) return null;                                       // hub has no spare carriers for the onward leg
-    const a1=allocate(wrap(D.v.id),d1,sink,a2.F), F=Math.min(a1.F,a2.F); // size leg 1 to the binding flow
+    const a1=bestAlloc(wrap(D.v.id),d1,sink,a2.F), F=Math.min(a1.F,a2.F); // size leg 1 to the binding flow
     if(F<1) return null;
     return {F,dCarr:a1.mUsed+a1.sUsed,totCarr:a1.mUsed+a1.sUsed+a2.mUsed+a2.sUsed,maxDist:Math.max(d1,d2),
-      kind:"relay",srcId:D.v.id,hubId:H.v.id,
+      kind:"relay",srcId:D.v.id,srcCapital:!!D.v.capital,hubId:H.v.id,
       legs:[{fromId:D.v.id,toV:H.v,a:a1,dst:d1,relay:"in"},{fromId:H.v.id,toV:R.v,a:a2,dst:d2,relay:"out"}]};
   }
-  function better(c,b){ // most crop delivered, then spare the donor's own fleet, then fewer carriers/legs, then nearer
+  function better(c,b){ // most crop delivered, then the capital only as a LAST tiebreak, then spare the donor's own fleet, then fewer carriers/legs, then nearer
     if(Math.abs(c.F-b.F)>0.5) return c.F>b.F;
+    if(!!c.srcCapital!==!!b.srcCapital) return !c.srcCapital; // equal crop -> prefer a non-capital donor (capital sends last, but only when it delivers no more than the alternative)
     if(c.dCarr!==b.dCarr) return c.dCarr<b.dCarr;
     if(c.totCarr!==b.totCarr) return c.totCarr<b.totCarr;
     if((c.kind==="direct")!==(b.kind==="direct")) return c.kind==="direct";
@@ -973,20 +1004,23 @@ function optimize(){
         relay:c.kind==="relay"?leg.relay:null,impact});
     });
   }
-  // The capital (if one is marked) is a crop donor of LAST RESORT: cover each draining village from
-  // the other (non-capital) support villages first, and only tap the capital's own crop if they
-  // can't finish the job. (Using the capital as a relay HUB is fine - forwarding doesn't spend its crop.)
+  // Using every village's surplus is the priority: ALL donors (capital included) compete for each
+  // deficit at once, and whoever delivers the most crop wins. The capital's "sends last" preference
+  // is only a TIEBREAK inside better() - it loses to a non-capital donor of equal delivery, but it is
+  // no longer held back when tapping it covers more of the deficit. Hub rule still stands: when a hub
+  // exists the capital feeds the hub (relay), not receivers directly, unless the receiver IS the hub.
   receivers.forEach(R=>{
     let need=R.need;
     while(need>1){
       let best=null;
       const consider=c=>{ if(c && (c.F>=optMinRoute || c.F>=need-1) && (!best||better(c,best))) best=c; };
-      const scan=fromCapital=>{ donors.forEach(D=>{ if(D.avail<=0.5 || !!D.v.capital!==fromCapital) return;
-        consider(directCand(D,R,need));
+      const scan=allowCapDirect=>{ donors.forEach(D=>{ if(D.avail<=0.5) return;
+        const capThruHub = anyHub && D.v.capital && !D.v.cropHub && !R.v.cropHub;
+        if(allowCapDirect || !capThruHub) consider(directCand(D,R,need));
         hubs.forEach(H=>{ if(H.v.id!==D.v.id && H.v.id!==R.v.id && carr[H.v.id].merch+carr[H.v.id].ship>0) consider(relayCand(D,H,R,need)); });
       }); };
-      scan(false);            // non-capital support villages first
-      if(!best) scan(true);   // capital only if nothing else can help
+      scan(false);            // all villages compete; capital routes through a hub if one is marked
+      if(!best) scan(true);   // fallback: let the capital send direct only if no hub route could cover it
       if(!best || best.F<1) break;                 // nothing can make progress
       const covered=(need-best.F)<=1;
       commitCand(best,covered);
@@ -995,6 +1029,28 @@ function optimize(){
     }
     if(need>1) unmet.push({name:R.v.name,need});
   });
+  // Optional: after every deficit is covered, funnel each village's LEFTOVER surplus crop to the
+  // capital (pile it up there). Nearest donors first; bounded by the capital's free granary room and
+  // the donors' remaining spare carriers. The capital itself is not a donor while this is on.
+  const capD = data.find(d=>d.v.capital);
+  if(state.cropToCapital && capD){
+    let room = Math.max(0, capD.capRoom);
+    const collectors = donors.filter(d=>d.avail>0.5 && d.v.id!==capD.v.id).sort((a,b)=>dist(a.v,capD.v)-dist(b.v,capD.v));
+    for(const D of collectors){
+      if(room<optMinRoute) break;
+      const target=Math.min(D.avail, room);
+      if(target<optMinRoute) continue;
+      const dst=dist(D.v,capD.v);
+      const a=bestAlloc(wrap(D.v.id),dst,{v:capD.v,crop:capD.crop,need:1e-6,capRoom:room},target);
+      if(a.F<1) continue;
+      carr[D.v.id].merch=Math.max(0,carr[D.v.id].merch-a.mUsed);
+      carr[D.v.id].ship =Math.max(0,carr[D.v.id].ship -a.sUsed);
+      routes.push({from:D.v.id,to:capD.v.id,fromName:D.v.name,toName:capD.v.name,
+        cropPerHour:a.F,perSend:Math.round(a.F*a.I),interval:a.I,distance:Math.round(dst),
+        merchants:a.mUsed,ships:a.sUsed,roundTrip:a.roundTrip,merchCapped:a.capped,relay:null,impact:"excess &rarr; capital"});
+      D.avail-=a.F; room-=a.F*a.I;
+    }
+  }
   // Stagger send offsets per source so carriers aren't all out at once.
   const bySrc={}; routes.forEach(r=>{ (bySrc[r.from]=bySrc[r.from]||[]).push(r); });
   Object.keys(bySrc).forEach(k=>{ const list=bySrc[k], n=list.length; list.forEach((r,i)=>{ r.offsetHours=+(((r.interval||1)*i)/Math.max(1,n)).toFixed(3); }); });
@@ -1256,6 +1312,7 @@ function optimizeOverflow(cropPlan, troopPlan){
   ((troopPlan&&troopPlan.routes)||[]).forEach(r=>{ const e=troopIn[r.to]||(troopIn[r.to]={lumber:0,clay:0,iron:0}); nonCrop.forEach(k=>e[k]+=(r.resources[k]||0)/(r.interval||1)); });
   const troopVils=state.villages.filter(v=>v.troopVillage).sort((a,b)=>(a.troopPriority||1)-(b.troopPriority||1));
   const routes=[]; let anyDonor=false; const anyRecv=troopVils.length>0; const urgent=new Set();
+  const MIN_LEG=1; // per-resource legs may be tiny here; the real Min route /h is enforced on the merged route total in buildAutoPlan
   nonCrop.forEach(k=>{
     // Donors: any NON-troop village with production surplus above its own reserve (celebration + build
     // buffer) and beyond what it already sends to cover troop needs. All of it is forwarded to troops.
@@ -1281,16 +1338,16 @@ function optimizeOverflow(cropPlan, troopPlan){
     donors.forEach(d=>{
       let give=d.give;
       for(const r of receivers){
-        if(give<optMinRoute || carr[d.v.id]<=0) break;
-        if(r.v.id===d.v.id || r.rate<optMinRoute) continue;
+        if(give<MIN_LEG || carr[d.v.id]<=0) break;
+        if(r.v.id===d.v.id || r.rate<MIN_LEG) continue;
         const dst=dist(d.v,r.v), Tm=(2*dst)/effSpeed(d.v);
         const I=snapInterval(Math.max(1,Math.min(24,Tm||1))), waves=Math.ceil(Tm/I), cap=effCap(d.v);
         const flow=Math.min(give, r.rate);
-        if(flow<optMinRoute) continue;
+        if(flow<MIN_LEG) continue;
         let perSend=Math.round(flow*I);
         let carriers=Math.max(1,Math.ceil(perSend/cap))*waves;
         if(carriers>carr[d.v.id]){ const w=Math.floor(carr[d.v.id]/waves); if(w<1) continue; perSend=Math.floor(w*cap); carriers=w*waves; }
-        if(perSend<optMinRoute) continue;
+        if(perSend<MIN_LEG) continue;
         const ph=perSend/I;
         routes.push({from:d.v.id,to:r.v.id,fromName:d.v.name,toName:r.v.name,res:k,
           perSend,interval:I,distance:Math.round(dst),merchants:carriers,perHour:ph,
@@ -1399,6 +1456,24 @@ function renderAnalysis(){
   }).join("");
   const totCell=k=>`<td class="num" style="color:var(--${tot[k]>=0?'ok':'bad'})">${signed(tot[k]*per)}</td>`;
   const btn=(p,lbl)=>`<button class="sm${per===p?' primary':''}" onclick="setBalancePer(${p})">${lbl}</button>`;
+  // Troop-village supply check: 24/7 requirement (training material + any custom need) vs what the
+  // ACTIVE routes + own production actually deliver, so you can see whether each is fulfilled.
+  const troopVils=state.villages.filter(v=>v.troopVillage).sort((a,b)=>(a.troopPriority||1)-(b.troopPriority||1));
+  let troopHtml='';
+  if(troopVils.length){
+    const nc=["lumber","clay","iron"];
+    const rowsT=troopVils.map(v=>{
+      const inn=flows.inn[v.id]||{}, out=flows.out[v.id]||{}, need=troopNeedsPerHour(v);
+      const cells=nc.map(k=>{ const have=prodBase(v,k)+(inn[k]||0)-(out[k]||0), req=need[k]||0;
+        return {k, have, req, ok: req<0.5 || have>=req-0.5}; });
+      const netCrop=projected(v,flows).net.crop, cropOk=netCrop>=-0.5;
+      const allOk=cells.every(c=>c.ok)&&cropOk;
+      const tds=cells.map(c=>`<td class="num" style="color:var(--${c.ok?'ok':'bad'})">${fmt(c.have*per)}<span style="opacity:.55"> / ${fmt(c.req*per)}</span></td>`).join("");
+      return `<tr><td>&#9876; ${esc(v.name)} <span style="opacity:.55">#${v.troopPriority||1}</span></td>${tds}<td class="num" style="color:var(--${cropOk?'ok':'bad'})">${signed(netCrop*per)}</td><td>${allOk?'<span style="color:var(--ok)">&#10003; fulfilled</span>':'<span style="color:var(--bad)">&#9888; short</span>'}</td></tr>`;
+    }).join("");
+    troopHtml=`<div style="margin-top:22px;margin-bottom:6px"><b>&#9876; Troop village supply</b> <span class="note" style="margin:0">&mdash; delivered (own production + active routes) <b>/ required</b> ${unit}; red = shortfall.</span></div>
+      <table><thead><tr><th>Troop village</th><th class="num">Lumber</th><th class="num">Clay</th><th class="num">Iron</th><th class="num">Crop net</th><th>Status</th></tr></thead><tbody>${rowsT}</tbody></table>`;
+  }
   el.innerHTML=`
     <div style="display:flex;gap:18px;align-items:baseline;margin-bottom:10px">
       <b>Villages analysis</b>
@@ -1408,7 +1483,8 @@ function renderAnalysis(){
     <table style="margin-bottom:20px"><thead><tr><th>Account total ${unit}</th><th class="num">Lumber</th><th class="num">Clay</th><th class="num">Iron</th><th class="num">Crop</th></tr></thead>
     <tbody><tr style="font-weight:650"><td>All villages</td>${totCell('lumber')}${totCell('clay')}${totCell('iron')}${totCell('crop')}</tr></tbody></table>
     <table><thead><tr><th>Village</th><th class="num">Lumber ${unit}</th><th class="num">Clay ${unit}</th><th class="num">Iron ${unit}</th><th class="num">Crop ${unit}</th></tr></thead>
-    <tbody>${body}</tbody></table>`;
+    <tbody>${body}</tbody></table>
+    ${troopHtml}`;
 }
 function setBalancePer(p){ balancePer = (p===24?24:1); renderAll(); }
 
@@ -1438,6 +1514,7 @@ function openVillage(id){
     <div class="field"><label>Coordinates X | Y</label><div style="display:flex;gap:6px"><input type="number" id="f_x" value="${v.x==null?'':v.x}" placeholder="X" style="width:50%"><input type="number" id="f_y" value="${v.y==null?'':v.y}" placeholder="Y" style="width:50%"></div></div>
     <div class="field full"><label style="display:flex;align-items:center;gap:8px;cursor:pointer"><input type="checkbox" id="f_building" ${v.stillBuilding?'checked':''}> <span>Still building &mdash; keep the Build buffer (${fmt(optMargin)}/h) of each resource here (not shipped away)</span></label></div>
     <div class="field full"><label style="display:flex;align-items:center;gap:8px;cursor:pointer"><input type="checkbox" id="f_capital" ${v.capital?'checked':''}> <span>&#128081; Capital &mdash; its crop is donated <b>last</b>: other support villages give crop first, and the capital only if they can&rsquo;t cover it (only one village can be the capital)</span></label></div>
+    <div class="field full"><label style="display:flex;align-items:center;gap:8px;cursor:pointer"><input type="checkbox" id="f_cropHub" ${v.cropHub?'checked':''}> <span>&#128674; Crop transport hub &mdash; crop is funneled through this village and distributed with its trade ships. When any hub is set, relays route <b>only</b> through hub villages (fewer, bigger routes)</span></label></div>
     <div class="field full"><label style="display:flex;align-items:center;gap:8px;cursor:pointer"><input type="checkbox" id="f_troop" ${v.troopVillage?'checked':''} onchange="document.getElementById('troopConfig').style.display=this.checked?'contents':'none'"> <span>Troop-making village &mdash; receives resources from surplus villages to sustain 24/7 training</span></label></div>
     <div id="troopConfig" style="display:${v.troopVillage?'contents':'none'}">
       <div class="sect">Troop Production &mdash; 24/7 barracks &amp; stable supply <span class="note" style="margin:0">(supply priority: drag rows on the Auto Routes page)</span></div>
@@ -1447,12 +1524,20 @@ function openVillage(id){
       <div class="field"><label>Train in stable</label><select id="f_sta_troop" onchange="updateTroopNeeds()">${troopOptionsHTML(v.trainable,'stable',v.stableTroop)}</select></div>
       <div class="field"><label>Workshop level (auto-fetched on pull)</label><input type="number" id="f_wsp_lvl" min="0" max="20" value="${v.workshopLevel||''}" placeholder="0" oninput="updateTroopNeeds()"></div>
       <div class="field"><label>Train in workshop (rams / catapults)</label><select id="f_wsp_troop" onchange="updateTroopNeeds()">${troopOptionsHTML(v.trainable,'workshop',v.workshopTroop)}</select></div>
-      <div class="field full"><label style="display:flex;align-items:center;gap:8px;cursor:pointer"><input type="checkbox" id="f_trainer" ${v.trainerArtifact?'checked':''} oninput="updateTroopNeeds()"> <span>Trainer artifact here &mdash; trains in &frac12; the time (doubles this village&rsquo;s supply need)</span></label></div>
+      <div class="field full"><label style="display:flex;align-items:center;gap:8px;cursor:pointer"><input type="checkbox" id="f_trainer_plan" ${trainerOn(v)?'checked':''} oninput="updateTroopNeeds()"> <span>&#9876; Trainer artifact &mdash; trains in ${(v.trainerFactorDetected===3?'a third of':'half')} the time. ${v.trainerDetected?'<span style="color:var(--ok)">Detected active here on last sync.</span> Untick to plan as if it were <b>off</b> (needs sized at normal training speed).':'Not detected here &mdash; tick to plan as if one were <b>running</b>.'}</span></label></div>
       <div class="field full" id="troopNeedsDisplay" style="font-size:12px;color:var(--dim);padding:4px 0"></div>
+      <div class="sect" style="margin-top:6px">Custom requirement /h <span class="note" style="margin:0">(fixed extra demand kept supplied on top of training &mdash; e.g. build queue, hero, reserve)</span></div>
+      <div class="field"><label>Lumber /h</label><input type="number" id="f_cn_l" value="${v.customNeed&&v.customNeed.lumber||''}" placeholder="0" oninput="updateTroopNeeds()"></div>
+      <div class="field"><label>Clay /h</label><input type="number" id="f_cn_c" value="${v.customNeed&&v.customNeed.clay||''}" placeholder="0" oninput="updateTroopNeeds()"></div>
+      <div class="field"><label>Iron /h</label><input type="number" id="f_cn_i" value="${v.customNeed&&v.customNeed.iron||''}" placeholder="0" oninput="updateTroopNeeds()"></div>
+      <div class="field"><label>Crop /h</label><input type="number" id="f_cn_cr" value="${v.customNeed&&v.customNeed.crop||''}" placeholder="0" oninput="updateTroopNeeds()"></div>
     </div>
     <div class="sect">Production /h</div>
     ${num("Lumber","f_pl",v.prod&&v.prod.lumber)}${num("Clay","f_pc",v.prod&&v.prod.clay)}
     ${num("Iron","f_pi",v.prod&&v.prod.iron)}${num("Crop (net if synced)","f_pcr",v.prod&&v.prod.crop)}
+    <div class="sect">Hero production /h <span class="note" style="margin:0">(what the hero adds here &mdash; stripped when &ldquo;Ignore hero production&rdquo; is on)</span></div>
+    ${num("Lumber","f_hp_l",v.heroProd&&v.heroProd.lumber)}${num("Clay","f_hp_c",v.heroProd&&v.heroProd.clay)}
+    ${num("Iron","f_hp_i",v.heroProd&&v.heroProd.iron)}${num("Crop","f_hp_cr",v.heroProd&&v.heroProd.crop)}
     <div class="sect">Consumption & storage</div>
     ${num("Base crop upkeep /h","f_base",v.baseConsumption,"troop upkeep")}
     <div class="field"><label>Granary capacity</label><input type="number" id="f_gcap" value="${v.granary&&v.granary.capacity!=null?v.granary.capacity:''}" placeholder="80000"></div>
@@ -1500,15 +1585,29 @@ function troopOptionsHTML(trainable, building, selected){
 }
 // Resources/h to keep the chosen barracks + stable units training 24/7. Uses the real per-server
 // unit cost and the training time captured at the village's current building level (rate=3600/s).
-// Trainer artifact: unique/small trains in HALF the time in its village; the great version is
-// 3/4 time across all villages. Stronger (smaller) multiplier wins. Less time -> more troops/h
-// -> proportionally more resources needed.
-function trainerFactor(v){ return Math.min((v&&v.trainerArtifact)?0.5:1, state.greatTrainer?0.75:1); }
+// Trainer artifact (small/great/unique) is auto-detected: it already shortens the training time
+// shown on the barracks/stable, which is what we capture in u.seconds - so rate=3600/s reflects it
+// per village with no manual toggle. Small trainer -> only that village's time drops; great/unique
+// -> every village's time drops; the captured times carry that automatically.
+// Whether to compute needs WITH a small Trainer artifact for this village: the user's manual choice
+// (planTrainer) if set, otherwise whatever the puller detected from the Treasury (trainerDetected).
+function trainerOn(v){ return (v&&v.planTrainer!=null) ? !!v.planTrainer : !!(v&&v.trainerDetected); }
 function troopNeedsPerHour(v){
-  const needs={lumber:0,clay:0,iron:0,crop:0}, list=v.trainable||[], f=trainerFactor(v);
+  const needs={lumber:0,clay:0,iron:0,crop:0}, list=v.trainable||[];
+  // The captured barracks/stable time already reflects the trainer's CURRENT (detected) on/off state.
+  // Normalize it back to base (no-trainer) time, then apply the state we want to PLAN for. factor is the
+  // trainer's time divisor read from the Treasury (2 = half time, 3 = a third); default 2 (small trainer).
+  const f=(v.trainerFactorDetected||2), detected=!!v.trainerDetected, plan=trainerOn(v);
+  // detected = the captured time already includes the trainer (the puller found it active in this village,
+  // small or all-villages). We normalize to base then re-apply the state we PLAN for, so detected+plan
+  // agree -> secMul 1 (numbers as synced); toggling projects the other state without double-counting.
+  const secMul=(detected?f:1)*(plan?1/f:1); // multiplier on captured u.seconds
   const add=name=>{ if(!name) return; const u=list.find(x=>x.name===name); if(!u||!u.seconds) return;
-    const rate=3600/(u.seconds*f); RES.forEach(k=>needs[k]+=rate*((u.cost&&u.cost[k])||0)); };
+    const rate=3600/(u.seconds*secMul); RES.forEach(k=>needs[k]+=rate*((u.cost&&u.cost[k])||0)); };
   add(v.barracksTroop); add(v.stableTroop); add(v.workshopTroop);
+  // Custom manual requirement /h (any resource): a fixed extra demand the optimizer must keep supplied
+  // to this village, on top of the auto-computed training needs (e.g. a hero, a build queue, a reserve).
+  const cn=v.customNeed; if(cn) RES.forEach(k=>needs[k]+=Math.max(0,cn[k]||0));
   return needs;
 }
 function syncMerchant(){
@@ -1522,8 +1621,10 @@ function updateTroopNeeds(){
   const bt=((document.getElementById("f_bar_troop")||{}).value)||"";
   const st=((document.getElementById("f_sta_troop")||{}).value)||"";
   const wt=((document.getElementById("f_wsp_troop")||{}).value)||"";
-  const tr=!!(document.getElementById("f_trainer")||{}).checked;
-  const needs=troopNeedsPerHour({trainable:list,barracksTroop:bt,stableTroop:st,workshopTroop:wt,trainerArtifact:tr});
+  const cn={lumber:+(document.getElementById("f_cn_l")||{}).value||0,clay:+(document.getElementById("f_cn_c")||{}).value||0,iron:+(document.getElementById("f_cn_i")||{}).value||0,crop:+(document.getElementById("f_cn_cr")||{}).value||0};
+  const tp=!!(document.getElementById("f_trainer_plan")||{}).checked;
+  const needs=troopNeedsPerHour({trainable:list,barracksTroop:bt,stableTroop:st,workshopTroop:wt,customNeed:cn,
+    planTrainer:tp, trainerDetected:editingV&&editingV.trainerDetected, trainerFactorDetected:editingV&&editingV.trainerFactorDetected});
   const total=needs.lumber+needs.clay+needs.iron;
   el.innerHTML=(total>=1)
     ? `24/7 supply: <span style="color:var(--lumber)">${fmt(needs.lumber)} Lmbr</span> + <span style="color:var(--clay)">${fmt(needs.clay)} Clay</span> + <span style="color:var(--iron)">${fmt(needs.iron)} Iron</span> /h`
@@ -1545,6 +1646,7 @@ function saveVillage(){
   const v={ id:(editingV&&editingV.id)||uid(), name:g("f_name").value.trim()||"Village", tribe:g("f_tribe").value,
     x:num("f_x"),y:num("f_y"),
     prod:{lumber:num("f_pl"),clay:num("f_pc"),iron:num("f_pi"),crop:num("f_pcr")},
+    heroProd:{lumber:num("f_hp_l"),clay:num("f_hp_c"),iron:num("f_hp_i"),crop:num("f_hp_cr")}, // hero's resource production here (stripped when Ignore hero production is on)
     baseConsumption:num("f_base"), troops:optTroopRows.filter(t=>t.type||t.count),
     warehouse:{capacity:num("f_wcap"),lumber:num("f_wl"),clay:num("f_wc"),iron:num("f_wi")},
     granary:{capacity:num("f_gcap"),crop:num("f_gcur")},
@@ -1559,9 +1661,15 @@ function saveVillage(){
     workshopLevel:+(document.getElementById("f_wsp_lvl").value)||0,
     workshopTroop:document.getElementById("f_wsp_troop").value||null,
     townHallLevel:+(document.getElementById("f_th").value)||0,
-    trainerArtifact:!!document.getElementById("f_trainer").checked,
+    trainerArtifact:false, // deprecated
+    // Trainer detection comes from the puller (Treasury scrape); planTrainer is the user's override for
+    // planning. Store null when the checkbox matches the detected state so it keeps auto-following syncs.
+    trainerDetected:!!(editingV&&editingV.trainerDetected), trainerFactorDetected:(editingV&&editingV.trainerFactorDetected)||2,
+    planTrainer:(document.getElementById("f_trainer_plan").checked===!!(editingV&&editingV.trainerDetected))?null:!!document.getElementById("f_trainer_plan").checked,
+    customNeed:{lumber:num("f_cn_l"),clay:num("f_cn_c"),iron:num("f_cn_i"),crop:num("f_cn_cr")}, // fixed manual demand /h, added to training needs
     stillBuilding:!!document.getElementById("f_building").checked,
     capital:!!document.getElementById("f_capital").checked, // crop donor of last resort
+    cropHub:!!document.getElementById("f_cropHub").checked, // relay hub: crop funnels through here, distributed by its ships
     trainable:editingV?editingV.trainable:[],
     synced:editingV?editingV.synced:false, did:editingV?editingV.did:0, updatedAt:Date.now() };
   if(editingV){ const i=state.villages.findIndex(x=>x.id===v.id); state.villages[i]=v; }
@@ -1711,6 +1819,7 @@ function mergeSync(incoming, silent, prune){
       if(nv.townHallLevel!=null) ex.townHallLevel=nv.townHallLevel; // for 24/7 celebration budgeting
       if(nv.celebration!==undefined) ex.celebration=nv.celebration; // currently-running celebration (or null)
       if(nv.trainable) ex.trainable=nv.trainable; // per-server unit cost + training time (from Barracks/Stable pages)
+      if(nv.trainerActive!==undefined){ ex.trainerDetected=!!nv.trainerActive; ex.trainerFactorDetected=nv.trainerFactor||2; } // Treasury scrape; planTrainer (user override) is preserved
       if(nv.synced){ ex.synced=true; ex.troops=[]; }
       ex.updatedAt=nv.updatedAt||Date.now();
       updated++;
@@ -1726,7 +1835,8 @@ function mergeSync(incoming, silent, prune){
         shipCapacityReal:nv.shipCapacityReal||0,
         troopVillage:false, troopPriority:1,
         barracksLevel:nv.barracksLevel||0, stableLevel:nv.stableLevel||0, workshopLevel:nv.workshopLevel||0, townHallLevel:nv.townHallLevel||0, celebration:nv.celebration||null,
-        barracksTroop:null, stableTroop:null, workshopTroop:null, trainable:nv.trainable||[], trainerArtifact:false, stillBuilding:false,
+        barracksTroop:null, stableTroop:null, workshopTroop:null, trainable:nv.trainable||[],
+        trainerDetected:!!nv.trainerActive, trainerFactorDetected:nv.trainerFactor||2, planTrainer:null, stillBuilding:false,
         synced:!!nv.synced, updatedAt:nv.updatedAt||Date.now() });
       added++;
     }
