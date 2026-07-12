@@ -1519,9 +1519,9 @@ function renderRoutes(){
   if(!state.routes.length){ el.innerHTML=head+`<div class="empty"><h3>No routes</h3><p>Add one manually, sync them from the game, or let <b>Auto Routes &#9889;</b> build a crop-balancing plan.</p></div>`; return; }
   const name=id=>{ const v=state.villages.find(v=>v.id===id); return v?v.name:"?"; };
   const per=balancePer===24?24:1, unit=per===24?"/24h":"/h"; // flow columns follow the same toggle
-  el.innerHTML=head+`<table><thead><tr><th>From</th><th>To</th><th class="num">Lumber ${unit}</th><th class="num">Clay ${unit}</th><th class="num">Iron ${unit}</th><th class="num">Crop ${unit}</th><th class="num">Interval</th><th class="num">Merchants</th><th></th></tr></thead><tbody>
+  el.innerHTML=head+`<table><thead><tr><th>From</th><th>To</th><th class="num">Lumber ${unit}</th><th class="num">Clay ${unit}</th><th class="num">Iron ${unit}</th><th class="num">Crop ${unit}</th><th class="num" title="How often the route repeats">Every</th><th class="num" title="Minute offset within the cycle so sends are staggered">Offset</th><th class="num">Merchants</th><th></th></tr></thead><tbody>
   ${state.routes.map(r=>{ const fl=k=>(r.resources&&r.resources[k]||0)/(r.intervalHours||1)*per; // resources / interval, scaled to the window
-    return `<tr><td>${esc(name(r.from))}</td><td>${esc(name(r.to))}</td><td class="num">${fmt(fl("lumber"))}</td><td class="num">${fmt(fl("clay"))}</td><td class="num">${fmt(fl("iron"))}</td><td class="num" style="color:var(--crop)">${fmt(fl("crop"))}</td><td class="num">${per}h</td><td class="num">${r.merchants||"&mdash;"} ${r.auto?'<span class="pill ok">auto</span>':''}</td><td class="num">${(()=>{const sl=sendLink(state.villages.find(v=>v.id===r.from),state.villages.find(v=>v.id===r.to),(r.resources&&r.resources.crop)||0);return sl?'<a href="'+sl+'" target="_blank" style="color:var(--accent);margin-right:6px">Send</a>':'';})()}<button class="sm" onclick="openRoute('${r.id}')">&#9998;</button> <button class="sm danger" onclick="delRoute('${r.id}')">&#10005;</button></td></tr>`;
+    return `<tr><td>${esc(name(r.from))}</td><td>${esc(name(r.to))}</td><td class="num">${fmt(fl("lumber"))}</td><td class="num">${fmt(fl("clay"))}</td><td class="num">${fmt(fl("iron"))}</td><td class="num" style="color:var(--crop)">${fmt(fl("crop"))}</td><td class="num">${r.intervalHours||1}h</td><td class="num">${hhmm(r.offsetHours||0)}</td><td class="num">${r.merchants||"&mdash;"} ${r.auto?'<span class="pill ok">auto</span>':''}</td><td class="num">${(()=>{const sl=sendLink(state.villages.find(v=>v.id===r.from),state.villages.find(v=>v.id===r.to),(r.resources&&r.resources.crop)||0);return sl?'<a href="'+sl+'" target="_blank" style="color:var(--accent);margin-right:6px">Send</a>':'';})()}<button class="sm" onclick="openRoute('${r.id}')">&#9998;</button> <button class="sm danger" onclick="delRoute('${r.id}')">&#10005;</button></td></tr>`;
   }).join("")}</tbody></table>`;
 }
 
@@ -1903,7 +1903,7 @@ function mergeSyncRoutes(incoming){
     if(!from||!to||from.id===to.id){ skipped++; return; }
     const k=from.id+">"+to.id; keep.add(k);
     const iv=snapInterval(nr.intervalHours||24);
-    const cur=map[k]||(map[k]={from:from.id,to:to.id,resources:{lumber:0,clay:0,iron:0,crop:0},intervalHours:iv,merchants:0});
+    const cur=map[k]||(map[k]={from:from.id,to:to.id,resources:{lumber:0,clay:0,iron:0,crop:0},intervalHours:iv,offsetHours:nr.offsetHours||0,merchants:0});
     RES.forEach(r=>cur.resources[r]+=(nr.resources&&nr.resources[r])||0);
     cur.intervalHours=Math.min(cur.intervalHours,iv);
     cur.merchants+=(nr.merchants||0);
@@ -1911,8 +1911,8 @@ function mergeSyncRoutes(incoming){
   let added=0, updated=0;
   Object.keys(map).forEach(k=>{
     const m=map[k], ex=state.routes.find(r=>r.synced&&(r.from+">"+r.to)===k);
-    if(ex){ ex.resources=m.resources; ex.intervalHours=m.intervalHours; ex.merchants=m.merchants||ex.merchants||1; ex.updatedAt=Date.now(); updated++; }
-    else { state.routes.push({id:uid(),from:m.from,to:m.to,resources:m.resources,intervalHours:m.intervalHours,merchants:m.merchants||1,synced:true,updatedAt:Date.now()}); added++; }
+    if(ex){ ex.resources=m.resources; ex.intervalHours=m.intervalHours; ex.offsetHours=m.offsetHours||0; ex.merchants=m.merchants||ex.merchants||1; ex.updatedAt=Date.now(); updated++; }
+    else { state.routes.push({id:uid(),from:m.from,to:m.to,resources:m.resources,intervalHours:m.intervalHours,offsetHours:m.offsetHours||0,merchants:m.merchants||1,synced:true,updatedAt:Date.now()}); added++; }
   });
   // prune synced routes that no longer exist in-game (manual routes are preserved)
   const before=state.routes.length;

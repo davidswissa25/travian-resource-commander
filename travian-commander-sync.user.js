@@ -212,7 +212,9 @@
           gaps.sort((a, b) => a - b); const med = gaps[Math.floor(gaps.length / 2)];
           if (med > 0) intervalHours = Math.max(1, Math.min(24, Math.round(med / 3600)));
         }
-        out.push({ fromDid: tr.from.id, toDid: tr.to.id, toName: tr.to.name, resources: per, intervalHours: intervalHours, merchants: merch });
+        // minute offset within each repeat cycle (staggering) - position of the first send in the interval
+        const offsetHours = ((sends[0].departureAt || 0) % (intervalHours * 3600)) / 3600;
+        out.push({ fromDid: tr.from.id, toDid: tr.to.id, toName: tr.to.name, resources: per, intervalHours: intervalHours, offsetHours: offsetHours, merchants: merch });
       });
       return out;
     }
