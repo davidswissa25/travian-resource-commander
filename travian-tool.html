@@ -1549,6 +1549,7 @@ function openVillage(id){
       <div class="field"><label>Workshop level (auto-fetched on pull)</label><input type="number" id="f_wsp_lvl" min="0" max="20" value="${v.workshopLevel||''}" placeholder="0" oninput="updateTroopNeeds()"></div>
       <div class="field"><label>Train in workshop (rams / catapults)</label><select id="f_wsp_troop" onchange="updateTroopNeeds()">${troopOptionsHTML(v.trainable,'workshop',v.workshopTroop)}</select></div>
       <div class="field full"><label style="display:flex;align-items:center;gap:8px;cursor:pointer"><input type="checkbox" id="f_trainer_plan" ${trainerOn(v)?'checked':''} oninput="updateTroopNeeds()"> <span>&#9876; Trainer artifact &mdash; trains in ${(v.trainerFactorDetected===3?'a third of':'half')} the time. ${v.trainerDetected?'<span style="color:var(--ok)">Detected active here on last sync.</span> Untick to plan as if it were <b>off</b> (needs sized at normal training speed).':'Not detected here &mdash; tick to plan as if one were <b>running</b>.'}</span></label></div>
+      <div class="field"><label>&#127894; Hero helmet training bonus</label><select id="f_helmet" onchange="updateTroopNeeds()">${[0,5,10,15,20,25,30].map(p=>`<option value="${p}"${(+(v.heroHelmet||0)===p)?' selected':''}>${p?('&minus;'+p+'% training time'):'none'}</option>`).join('')}</select></div>
       <div class="field full" id="troopNeedsDisplay" style="font-size:12px;color:var(--dim);padding:4px 0"></div>
       <div class="sect" style="margin-top:6px">Custom requirement /h <span class="note" style="margin:0">(fixed extra demand kept supplied on top of training &mdash; e.g. build queue, hero, reserve)</span></div>
       <div class="field"><label>Lumber /h</label><input type="number" id="f_cn_l" value="${v.customNeed&&v.customNeed.lumber||''}" placeholder="0" oninput="updateTroopNeeds()"></div>
@@ -1625,7 +1626,10 @@ function troopNeedsPerHour(v){
   // detected = the captured time already includes the trainer (the puller found it active in this village,
   // small or all-villages). We normalize to base then re-apply the state we PLAN for, so detected+plan
   // agree -> secMul 1 (numbers as synced); toggling projects the other state without double-counting.
-  const secMul=(detected?f:1)*(plan?1/f:1); // multiplier on captured u.seconds
+  // Hero helmet: a 5-30% training-time reduction from the hero's equipped helmet, planned per village
+  // (the hero sits in one village). Stacks on top of the trainer artifact - both shorten the same time.
+  const helmetMul=1-Math.min(30,Math.max(0,+v.heroHelmet||0))/100;
+  const secMul=(detected?f:1)*(plan?1/f:1)*helmetMul; // multiplier on captured u.seconds
   const add=name=>{ if(!name) return; const u=list.find(x=>x.name===name); if(!u||!u.seconds) return;
     const rate=3600/(u.seconds*secMul); RES.forEach(k=>needs[k]+=rate*((u.cost&&u.cost[k])||0)); };
   add(v.barracksTroop); add(v.stableTroop); add(v.workshopTroop);
@@ -1647,7 +1651,8 @@ function updateTroopNeeds(){
   const wt=((document.getElementById("f_wsp_troop")||{}).value)||"";
   const cn={lumber:+(document.getElementById("f_cn_l")||{}).value||0,clay:+(document.getElementById("f_cn_c")||{}).value||0,iron:+(document.getElementById("f_cn_i")||{}).value||0,crop:+(document.getElementById("f_cn_cr")||{}).value||0};
   const tp=!!(document.getElementById("f_trainer_plan")||{}).checked;
-  const needs=troopNeedsPerHour({trainable:list,barracksTroop:bt,stableTroop:st,workshopTroop:wt,customNeed:cn,
+  const hh=+((document.getElementById("f_helmet")||{}).value)||0;
+  const needs=troopNeedsPerHour({trainable:list,barracksTroop:bt,stableTroop:st,workshopTroop:wt,customNeed:cn,heroHelmet:hh,
     planTrainer:tp, trainerDetected:editingV&&editingV.trainerDetected, trainerFactorDetected:editingV&&editingV.trainerFactorDetected});
   const total=needs.lumber+needs.clay+needs.iron;
   el.innerHTML=(total>=1)
@@ -1690,6 +1695,7 @@ function saveVillage(){
     // planning. Store null when the checkbox matches the detected state so it keeps auto-following syncs.
     trainerDetected:!!(editingV&&editingV.trainerDetected), trainerFactorDetected:(editingV&&editingV.trainerFactorDetected)||2,
     planTrainer:(document.getElementById("f_trainer_plan").checked===!!(editingV&&editingV.trainerDetected))?null:!!document.getElementById("f_trainer_plan").checked,
+    heroHelmet:+((document.getElementById("f_helmet")||{}).value)||0, // hero helmet training-time reduction % (0-30)
     customNeed:{lumber:num("f_cn_l"),clay:num("f_cn_c"),iron:num("f_cn_i"),crop:num("f_cn_cr")}, // fixed manual demand /h, added to training needs
     stillBuilding:!!document.getElementById("f_building").checked,
     capital:!!document.getElementById("f_capital").checked, // crop donor of last resort
