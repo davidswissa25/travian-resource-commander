@@ -933,7 +933,7 @@ function optimize(){
   // Relay hubs forward crop on (1 hop). If any village is marked a crop transport hub, ONLY those
   // are used - so crop funnels through your ship-rich hub instead of ad-hoc relays everywhere.
   const anyHub=state.villages.some(v=>v.cropHub);
-  const hubs=data.filter(d=>d.net>=0 && (anyHub ? d.v.cropHub : true)).map(d=>({v:d.v}));
+  const hubs=data.filter(d=>d.net>=0 && !d.v.troopVillage && (anyHub ? d.v.cropHub : true)).map(d=>({v:d.v})); // never relay crop THROUGH (out of) a troop village
   const balanced=receivers.length===0, routes=[], unmet=[];
   const hadDonors=donors.length>0, freeCarriers=donors.reduce((s,d)=>s+carr[d.v.id].merch+carr[d.v.id].ship,0);
   // Batch model: send "perSend" crop every "interval" h. Interval is as long as possible
