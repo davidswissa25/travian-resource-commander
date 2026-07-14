@@ -1441,7 +1441,6 @@ function balanceRow(v,flows){
   const inn=flows.inn[v.id]||{}, out=flows.out[v.id]||{};
   const p=projected(v,flows), cells=RES.map(k=>{
     let base=prodBase(v,k); if(k==="crop") base-=consumption(v); // troop-training crop already excluded from consumption()
-    const rawNet=base+(inn[k]||0)-(out[k]||0); // net BEFORE the outgoing cap - tells if sending is what flattens it
     const net=p.net[k], cur=p.cur[k], cap=p.cap[k]||0; let tag, col="ok", eta=Infinity;
     if(net<-0.5){ eta=cur/(-net); col=eta<6?"bad":"warn"; tag="empty in "+hms(eta); }
     else if(net>0.5){
@@ -1449,8 +1448,10 @@ function balanceRow(v,flows){
       else if(cap>0){ eta=(cap-cur)/net; if(eta<24){ col="warn"; tag="full in "+hms(eta);} else tag="filling"; }
       else tag="filling";
     }
-    // net ~ 0: distinguish a natural balance from sending being capped at what's available
-    else tag = rawNet < -0.5 ? "sending surplus" : "balanced";
+    // net ~ 0: a village that produces a surplus (base>0) and ships it all out reads as flat - call it
+    // "sending surplus" and show how much is leaving, vs a genuinely balanced village.
+    else if(base>0.5 && (out[k]||0)>0.5){ const sent=Math.min((out[k]||0), base+(inn[k]||0)); tag="sending surplus "+fmt(sent)+"/h"; }
+    else tag="balanced";
     return {k,net,col,tag,eta};
   });
   const worst=cells.reduce((a,b)=>(b.col==="bad"?2:b.col==="warn"?1:0)>(a.col==="bad"?2:a.col==="warn"?1:0)?b:a,cells[0]);
