@@ -479,7 +479,10 @@ function troopUpkeep(v){ return (v.troops||[]).reduce((s,t)=>s+(t.count||0)*(t.u
 // field (troopUpkeep), and celebration crop. The crop COST of *building* troops is deliberately
 // excluded - the game simply won't train when crop runs out, so it can't actually starve you, and it
 // shouldn't drag account net crop or the starvation clock negative.
-function consumption(v){ return (v.baseConsumption||0)+troopUpkeep(v)+celebrationNeedsPerHour(v).crop; }
+function consumption(v){ return (v.baseConsumption||0)+troopUpkeep(v)+celebrationNeedsPerHour(v).crop+Math.max(0,(v&&v.customNeed&&v.customNeed.crop)||0); }
+// A village is a "supply target" (must be kept fed with lumber/clay/iron) if it makes troops OR carries
+// a manual custom requirement of any of those - so non-troop villages with a fixed demand get supplied too.
+function hasSupplyNeed(v){ if(v&&v.troopVillage) return true; const c=v&&v.customNeed; return !!c && (Math.max(0,c.lumber||0)+Math.max(0,c.clay||0)+Math.max(0,c.iron||0))>0.5; }
 function routeFlows(){
   const byId={}; state.villages.forEach(v=>byId[v.id]=v);
   // Nominal hourly flow each route requests.
@@ -823,15 +826,15 @@ function renderUnified(plan){
       const lci=['lumber','clay','iron'].map(k=>{ const got=avail(k), req=need[k]||0;
         const col=req<1?'ok':(got>=req-0.5?'ok':(got>0?'warn':'bad'));
         return `<td class="num" style="color:var(--${col})">${fmt(got)}${req>=1?' <span style="color:var(--faint)">/ '+fmt(req)+'</span>':''}</td>`; }).join('');
-      // warehouse fill assuming you are NOT training (production + incoming just piles up)
+      // warehouse fill from EMPTY assuming you are NOT training (production + incoming just piles up)
       const cap=(v.warehouse&&v.warehouse.capacity)||0; let fill=Infinity;
-      ['lumber','clay','iron'].forEach(k=>{ const cur=(v.warehouse&&v.warehouse[k])||0, netk=avail(k);
-        if(netk>0.5 && cap>0){ const e=(cap-cur)/netk; if(e<fill) fill=e; } });
+      ['lumber','clay','iron'].forEach(k=>{ const netk=avail(k);
+        if(netk>0.5 && cap>0){ const e=cap/netk; if(e<fill) fill=e; } });
       const fillCell = fill===Infinity ? '<span style="color:var(--faint)">&mdash;</span>'
         : `<span style="color:var(--${fill<WAREHOUSE_FILL_H?'bad':fill<24?'warn':'ok'})">${hms(fill)}</span>`;
       return `<tr draggable="true" ondragstart="troopDrag(event,'${v.id}')" ondragover="event.preventDefault()" ondrop="troopDrop(event,'${v.id}')" style="cursor:grab"><td><span style="color:var(--faint)" title="Drag to reorder supply priority">&#9776;</span> <b style="color:var(--accent)">${idx+1}</b> ${esc(v.name)}</td>${lci}<td class="num" style="color:var(--crop)">${fmt(avail('crop'))}${need.crop>=1?' <span style="color:var(--faint)">/ '+fmt(need.crop)+' train</span>':''}</td><td class="num">${fillCell}</td></tr>`;
     }).join('');
-    troopTable=`<div style="margin-bottom:16px"><b>&#9876; Supply at troop villages /h</b> <span class="note" style="margin:0">&mdash; own production + incoming <span style="color:var(--faint)">/ 24&#8260;7 training need</span>; warehouse fill = soonest of L/C/I if <b>not</b> training; <b>drag rows</b> to reorder supply priority</span>
+    troopTable=`<div style="margin-bottom:16px"><b>&#9876; Supply at troop villages /h</b> <span class="note" style="margin:0">&mdash; own production + incoming <span style="color:var(--faint)">/ 24&#8260;7 training need</span>; warehouse fill (from empty) = soonest of L/C/I if <b>not</b> training; <b>drag rows</b> to reorder supply priority</span>
       <table style="margin-top:6px"><thead><tr><th>Troop village</th><th class="num">Lumber</th><th class="num">Clay</th><th class="num">Iron</th><th class="num">Crop</th><th class="num">Warehouse fills</th></tr></thead><tbody>
       ${rows}<tr style="font-weight:650"><td>Total</td><td class="num" style="color:var(--lumber)">${fmt(tot.lumber)}</td><td class="num" style="color:var(--clay)">${fmt(tot.clay)}</td><td class="num" style="color:var(--iron)">${fmt(tot.iron)}</td><td class="num" style="color:var(--crop)">${fmt(tot.crop)}</td><td></td></tr></tbody></table></div>`;
   }
@@ -1127,7 +1130,7 @@ function routeLink(fromV){
 // Villages are served in priority order (troopPriority 1 = first). cropPlan routes
 // are accounted for so the two plans don't double-book the same carrier fleet.
 function optimizeTroopSupply(cropPlan){
-  const troopVils=state.villages.filter(v=>v.troopVillage)
+  const troopVils=state.villages.filter(hasSupplyNeed)
     .sort((a,b)=>(a.troopPriority||1)-(b.troopPriority||1));
   if(!troopVils.length) return {routes:[],summary:"",noTroops:true};
   const flows=planFlows(), committed=planCommitted();
@@ -1137,7 +1140,7 @@ function optimizeTroopSupply(cropPlan){
     e.merchants+=r.merchants||0; e.ships+=r.ships||0;
   });
   const nonCrop=["lumber","clay","iron"], routes=[];
-  const donors=state.villages.filter(v=>!v.troopVillage).map(v=>{
+  const donors=state.villages.filter(v=>!hasSupplyNeed(v)).map(v=>{
     const net=netRates(v,flows), cel=keepReserve(v);
     const c=committed[v.id]||{merchants:0,ships:0}, ce=cropExtra[v.id]||{merchants:0,ships:0};
     // reserve the donor's own 24/7 celebration need + build buffer before it donates lumber/clay/iron
@@ -1208,15 +1211,15 @@ function optimizeTroopSupply(cropPlan){
   const uncovered=troopVils.filter(v=>{
     const n=needs[v.id]; return nonCrop.some(k=>(n&&n[k]||0)>1);
   });
-  const hasConfig=troopVils.some(v=>v.barracksLevel||v.stableLevel);
+  const hasConfig=troopVils.some(v=>v.barracksLevel||v.stableLevel||hasSupplyNeed(v)&&!v.troopVillage);
   let summary;
   if(!hasConfig) summary="Mark barracks/stable levels and select a troop type in each village's Edit form.";
-  else if(routes.length) summary=`${routes.length} route${routes.length>1?'s':''} proposed to supply ${[...new Set(routes.map(r=>r.to))].length} troop village${troopVils.length>1?'s':''} (priority order).${uncovered.length?' '+uncovered.length+' village(s) partially uncovered — insufficient donor surplus or free carriers.':''}`;
+  else if(routes.length) summary=`${routes.length} route${routes.length>1?'s':''} proposed to supply ${[...new Set(routes.map(r=>r.to))].length} village${troopVils.length>1?'s':''} (priority order).${uncovered.length?' '+uncovered.length+' village(s) partially uncovered — insufficient donor surplus or free carriers.':''}`;
   else summary="Troop villages configured but no donor has surplus lumber/clay/iron with free carriers to send.";
   return {routes,summary,needs,troopVils,uncovered,hasConfig};
 }
 function renderTroopSection(cropPlan){
-  const troopVils=state.villages.filter(v=>v.troopVillage)
+  const troopVils=state.villages.filter(hasSupplyNeed)
     .sort((a,b)=>(a.troopPriority||1)-(b.troopPriority||1));
   const plan=optimizeTroopSupply(cropPlan);
   let html=`<div style="margin-top:24px;padding-top:18px;border-top:1px solid var(--line)">
@@ -1329,7 +1332,7 @@ function optimizeOverflow(cropPlan, troopPlan){
   // so a troop village's remaining training "burn" capacity can also soak up surplus, not just storage.
   const troopIn={};
   ((troopPlan&&troopPlan.routes)||[]).forEach(r=>{ const e=troopIn[r.to]||(troopIn[r.to]={lumber:0,clay:0,iron:0}); nonCrop.forEach(k=>e[k]+=(r.resources[k]||0)/(r.interval||1)); });
-  const troopVils=state.villages.filter(v=>v.troopVillage).sort((a,b)=>(a.troopPriority||1)-(b.troopPriority||1));
+  const troopVils=state.villages.filter(hasSupplyNeed).sort((a,b)=>(a.troopPriority||1)-(b.troopPriority||1));
   const routes=[]; let anyDonor=false; const anyRecv=troopVils.length>0; const urgent=new Set();
   const MIN_LEG=1; // per-resource legs may be tiny here; the real Min route /h is enforced on the merged route total in buildAutoPlan
   nonCrop.forEach(k=>{
@@ -1337,7 +1340,7 @@ function optimizeOverflow(cropPlan, troopPlan){
     // buffer) and beyond what it already sends to cover troop needs. All of it is forwarded to troops.
     // Sorted by how soon its warehouse fills, so the ones filling within WAREHOUSE_FILL_H are relieved
     // first with the limited carriers (cascading to the next troop village as each fills).
-    const donors=state.villages.filter(v=>!v.troopVillage).map(v=>{
+    const donors=state.villages.filter(v=>!hasSupplyNeed(v)).map(v=>{
       const p=proj[v.id], net=p.net[k], cap=p.cap[k]||0, cur=p.cur[k];
       const res=keepReserve(v)[k]||0, ut=(usedByTroop[v.id]&&usedByTroop[v.id][k])||0;
       const eta = net>0.5 && cap>0 ? (cap-cur)/net : Infinity;
@@ -1478,11 +1481,12 @@ function renderAnalysis(){
   const btn=(p,lbl)=>`<button class="sm${per===p?' primary':''}" onclick="setBalancePer(${p})">${lbl}</button>`;
   // Troop-village supply check: 24/7 requirement (training material + any custom need) vs what the
   // ACTIVE routes + own production actually deliver, so you can see whether each is fulfilled.
-  const troopVils=state.villages.filter(v=>v.troopVillage).sort((a,b)=>(a.troopPriority||1)-(b.troopPriority||1));
+  const troopVils=state.villages.filter(hasSupplyNeed).sort((a,b)=>(a.troopPriority||1)-(b.troopPriority||1));
   let troopHtml='';
   if(troopVils.length){
     const nc=["lumber","clay","iron"], near=0.9, sev={ok:0,warn:1,bad:2}; // within 10% short = yellow (warn), not red
     const rowsT=troopVils.map(v=>{
+      const tag=v.troopVillage?'&#9876;':'&#128203;'; // sword for troop villages, clipboard for custom-requirement-only
       const inn=flows.inn[v.id]||{}, out=flows.out[v.id]||{}, need=troopNeedsPerHour(v);
       const cells=nc.map(k=>{ const have=prodBase(v,k)+(inn[k]||0)-(out[k]||0), req=need[k]||0;
         const col=(req<0.5||have>=req-0.5)?'ok':(have>=req*near?'warn':'bad');
@@ -1494,10 +1498,10 @@ function renderAnalysis(){
                  :worst==='warn'?'<span style="color:var(--warn)">&#9888; slightly short</span>'
                  :'<span style="color:var(--bad)">&#9888; short</span>';
       const tds=cells.map(c=>`<td class="num" style="color:var(--${c.col})">${fmt(c.have*per)}<span style="opacity:.55"> / ${fmt(c.req*per)}</span></td>`).join("");
-      return `<tr><td>&#9876; ${esc(v.name)} <span style="opacity:.55">#${v.troopPriority||1}</span></td>${tds}<td class="num" style="color:var(--${cropCol})">${signed(netCrop*per)}</td><td>${status}</td></tr>`;
+      return `<tr><td>${tag} ${esc(v.name)}${v.troopVillage?` <span style="opacity:.55">#${v.troopPriority||1}</span>`:''}</td>${tds}<td class="num" style="color:var(--${cropCol})">${signed(netCrop*per)}</td><td>${status}</td></tr>`;
     }).join("");
-    troopHtml=`<div style="margin-bottom:6px"><b>&#9876; Troop village supply</b> <span class="note" style="margin:0">&mdash; delivered (own production + active routes) <b>/ required</b> ${unit}; yellow = within 10% short, red = shortfall.</span></div>
-      <table style="margin-bottom:22px"><thead><tr><th>Troop village</th><th class="num">Lumber</th><th class="num">Clay</th><th class="num">Iron</th><th class="num">Crop net</th><th>Status</th></tr></thead><tbody>${rowsT}</tbody></table>`;
+    troopHtml=`<div style="margin-bottom:6px"><b>&#9876; Village supply requirements</b> <span class="note" style="margin:0">&mdash; troop-making &amp; custom-requirement villages; delivered (own production + active routes) <b>/ required</b> ${unit}; yellow = within 10% short, red = shortfall.</span></div>
+      <table style="margin-bottom:22px"><thead><tr><th>Village</th><th class="num">Lumber</th><th class="num">Clay</th><th class="num">Iron</th><th class="num">Crop net</th><th>Status</th></tr></thead><tbody>${rowsT}</tbody></table>`;
   }
   el.innerHTML=`
     <div style="display:flex;gap:18px;align-items:baseline;margin-bottom:10px">
@@ -1552,12 +1556,12 @@ function openVillage(id){
       <div class="field full"><label style="display:flex;align-items:center;gap:8px;cursor:pointer"><input type="checkbox" id="f_trainer_plan" ${trainerOn(v)?'checked':''} oninput="updateTroopNeeds()"> <span>&#9876; Trainer artifact &mdash; trains in ${(v.trainerFactorDetected===3?'a third of':'half')} the time. ${v.trainerDetected?'<span style="color:var(--ok)">Detected active here on last sync.</span> Untick to plan as if it were <b>off</b> (needs sized at normal training speed).':'Not detected here &mdash; tick to plan as if one were <b>running</b>.'}</span></label></div>
       <div class="field"><label>&#127894; Hero helmet training bonus</label><select id="f_helmet" onchange="updateTroopNeeds()">${[0,5,10,15,20,25,30].map(p=>`<option value="${p}"${(+(v.heroHelmet||0)===p)?' selected':''}>${p?('&minus;'+p+'% training time'):'none'}</option>`).join('')}</select></div>
       <div class="field full" id="troopNeedsDisplay" style="font-size:12px;color:var(--dim);padding:4px 0"></div>
-      <div class="sect" style="margin-top:6px">Custom requirement /h <span class="note" style="margin:0">(fixed extra demand kept supplied on top of training &mdash; e.g. build queue, hero, reserve)</span></div>
-      <div class="field"><label>Lumber /h</label><input type="number" id="f_cn_l" value="${v.customNeed&&v.customNeed.lumber||''}" placeholder="0" oninput="updateTroopNeeds()"></div>
-      <div class="field"><label>Clay /h</label><input type="number" id="f_cn_c" value="${v.customNeed&&v.customNeed.clay||''}" placeholder="0" oninput="updateTroopNeeds()"></div>
-      <div class="field"><label>Iron /h</label><input type="number" id="f_cn_i" value="${v.customNeed&&v.customNeed.iron||''}" placeholder="0" oninput="updateTroopNeeds()"></div>
-      <div class="field"><label>Crop /h</label><input type="number" id="f_cn_cr" value="${v.customNeed&&v.customNeed.crop||''}" placeholder="0" oninput="updateTroopNeeds()"></div>
     </div>
+    <div class="sect" style="margin-top:6px">Custom requirement /h <span class="note" style="margin:0">(fixed extra demand kept supplied to this village &mdash; on top of any training. Works on any village: build queue, hero, reserve. Lumber/clay/iron pull in supply routes; crop is reserved from its surplus)</span></div>
+    <div class="field"><label>Lumber /h</label><input type="number" id="f_cn_l" value="${v.customNeed&&v.customNeed.lumber||''}" placeholder="0" oninput="updateTroopNeeds()"></div>
+    <div class="field"><label>Clay /h</label><input type="number" id="f_cn_c" value="${v.customNeed&&v.customNeed.clay||''}" placeholder="0" oninput="updateTroopNeeds()"></div>
+    <div class="field"><label>Iron /h</label><input type="number" id="f_cn_i" value="${v.customNeed&&v.customNeed.iron||''}" placeholder="0" oninput="updateTroopNeeds()"></div>
+    <div class="field"><label>Crop /h</label><input type="number" id="f_cn_cr" value="${v.customNeed&&v.customNeed.crop||''}" placeholder="0" oninput="updateTroopNeeds()"></div>
     <div class="sect">Production /h</div>
     ${num("Lumber","f_pl",v.prod&&v.prod.lumber)}${num("Clay","f_pc",v.prod&&v.prod.clay)}
     ${num("Iron","f_pi",v.prod&&v.prod.iron)}${num("Crop (net if synced)","f_pcr",v.prod&&v.prod.crop)}
