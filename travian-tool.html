@@ -572,11 +572,20 @@ function troopDrag(ev,vid){ troopDragId=vid; try{ev.dataTransfer.effectAllowed='
 function troopDrop(ev,vid){ ev.preventDefault();
   const from=troopDragId; troopDragId=null;
   if(!from||from===vid) return;
-  const vs=state.villages.filter(v=>v.troopVillage).sort((a,b)=>(a.troopPriority||1)-(b.troopPriority||1));
+  const vs=state.villages.filter(hasSupplyNeed).sort((a,b)=>(a.troopPriority||1)-(b.troopPriority||1));
   const f=vs.findIndex(v=>v.id===from), t=vs.findIndex(v=>v.id===vid);
   if(f<0||t<0) return;
   const [m]=vs.splice(f,1); vs.splice(t,0,m);
   vs.forEach((v,i)=>v.troopPriority=i+1); save(); renderOptimizer();
+}
+// Place a supply target (troop or custom-need village) at a chosen 1-based priority slot, shifting the rest.
+function reinsertSupplyPriority(vid,pos){
+  const list=state.villages.filter(hasSupplyNeed).sort((a,b)=>(a.troopPriority||1)-(b.troopPriority||1));
+  const v=list.find(x=>x.id===vid); if(!v) return;
+  list.splice(list.indexOf(v),1);
+  const idx=Math.max(0,Math.min(list.length,(pos||list.length+1)-1));
+  list.splice(idx,0,v);
+  list.forEach((x,i)=>x.troopPriority=i+1);
 }
 function effSpeed(v){ return (v.merchantSpeed||16)*(state.serverSpeed||1)*bonusMult(); }
 function effCap(v){
@@ -814,8 +823,8 @@ function renderUnified(plan){
   // per-village incoming per resource (used by the troop-village summary below)
   const io={}, ioOf=id=>io[id]||(io[id]={in:{lumber:0,clay:0,iron:0,crop:0},out:{lumber:0,clay:0,iron:0,crop:0}});
   plan.routes.forEach(r=>RES.forEach(k=>{ const f=r.flow[k]||0; if(f>0){ ioOf(r.from).out[k]+=f; ioOf(r.to).in[k]+=f; } }));
-  // Summary of what this plan actually delivers to troop-making villages (incoming /h vs 24/7 training need)
-  const troopVils=state.villages.filter(v=>v.troopVillage).sort((a,b)=>(a.troopPriority||1)-(b.troopPriority||1));
+  // Summary of what this plan actually delivers to supply targets (incoming /h vs 24/7 need)
+  const troopVils=state.villages.filter(hasSupplyNeed).sort((a,b)=>(a.troopPriority||1)-(b.troopPriority||1));
   let troopTable='';
   if(troopVils.length){
     const tot={lumber:0,clay:0,iron:0,crop:0};
@@ -832,10 +841,11 @@ function renderUnified(plan){
         if(netk>0.5 && cap>0){ const e=cap/netk; if(e<fill) fill=e; } });
       const fillCell = fill===Infinity ? '<span style="color:var(--faint)">&mdash;</span>'
         : `<span style="color:var(--${fill<WAREHOUSE_FILL_H?'bad':fill<24?'warn':'ok'})">${hms(fill)}</span>`;
-      return `<tr draggable="true" ondragstart="troopDrag(event,'${v.id}')" ondragover="event.preventDefault()" ondrop="troopDrop(event,'${v.id}')" style="cursor:grab"><td><span style="color:var(--faint)" title="Drag to reorder supply priority">&#9776;</span> <b style="color:var(--accent)">${idx+1}</b> ${esc(v.name)}</td>${lci}<td class="num" style="color:var(--crop)">${fmt(avail('crop'))}${need.crop>=1?' <span style="color:var(--faint)">/ '+fmt(need.crop)+' train</span>':''}</td><td class="num">${fillCell}</td></tr>`;
+      const tag=v.troopVillage?'&#9876;':'&#128203;';
+      return `<tr draggable="true" ondragstart="troopDrag(event,'${v.id}')" ondragover="event.preventDefault()" ondrop="troopDrop(event,'${v.id}')" style="cursor:grab"><td><span style="color:var(--faint)" title="Drag to reorder supply priority">&#9776;</span> <b style="color:var(--accent)">${idx+1}</b> ${tag} ${esc(v.name)}</td>${lci}<td class="num" style="color:var(--crop)">${fmt(avail('crop'))}${need.crop>=1?' <span style="color:var(--faint)">/ '+fmt(need.crop)+'</span>':''}</td><td class="num">${fillCell}</td></tr>`;
     }).join('');
-    troopTable=`<div style="margin-bottom:16px"><b>&#9876; Supply at troop villages /h</b> <span class="note" style="margin:0">&mdash; own production + incoming <span style="color:var(--faint)">/ 24&#8260;7 training need</span>; warehouse fill (from empty) = soonest of L/C/I if <b>not</b> training; <b>drag rows</b> to reorder supply priority</span>
-      <table style="margin-top:6px"><thead><tr><th>Troop village</th><th class="num">Lumber</th><th class="num">Clay</th><th class="num">Iron</th><th class="num">Crop</th><th class="num">Warehouse fills</th></tr></thead><tbody>
+    troopTable=`<div style="margin-bottom:16px"><b>&#9876; Supply at troop &amp; custom villages /h</b> <span class="note" style="margin:0">&mdash; own production + incoming <span style="color:var(--faint)">/ 24&#8260;7 need</span>; warehouse fill (from empty) = soonest of L/C/I if <b>not</b> training; <b>drag rows</b> to reorder supply priority</span>
+      <table style="margin-top:6px"><thead><tr><th>Village</th><th class="num">Lumber</th><th class="num">Clay</th><th class="num">Iron</th><th class="num">Crop</th><th class="num">Warehouse fills</th></tr></thead><tbody>
       ${rows}<tr style="font-weight:650"><td>Total</td><td class="num" style="color:var(--lumber)">${fmt(tot.lumber)}</td><td class="num" style="color:var(--clay)">${fmt(tot.clay)}</td><td class="num" style="color:var(--iron)">${fmt(tot.iron)}</td><td class="num" style="color:var(--crop)">${fmt(tot.crop)}</td><td></td></tr></tbody></table></div>`;
   }
   let html=troopTable+`<table><thead><tr><th>To</th><th class="num">Lumber</th><th class="num">Clay</th><th class="num">Iron</th><th class="num">Crop</th><th class="num">Every</th><th class="num">Carriers</th><th>Purpose</th><th></th></tr></thead><tbody>`;
@@ -1140,11 +1150,13 @@ function optimizeTroopSupply(cropPlan){
     e.merchants+=r.merchants||0; e.ships+=r.ships||0;
   });
   const nonCrop=["lumber","clay","iron"], routes=[];
-  const donors=state.villages.filter(v=>!hasSupplyNeed(v)).map(v=>{
-    const net=netRates(v,flows), cel=keepReserve(v);
+  const donors=state.villages.map(v=>{
+    const net=netRates(v,flows), cel=keepReserve(v), own=troopNeedsPerHour(v);
     const c=committed[v.id]||{merchants:0,ships:0}, ce=cropExtra[v.id]||{merchants:0,ships:0};
-    // reserve the donor's own 24/7 celebration need + build buffer before it donates lumber/clay/iron
-    const avail={}; nonCrop.forEach(k=>avail[k]=Math.max(0,net[k]-(cel[k]||0)));
+    // reserve the donor's own 24/7 celebration need + build buffer + its OWN supply requirement
+    // (troop training + custom demand) before it donates lumber/clay/iron - so a supply target that
+    // is already met can still forward its genuine spare to fill other villages' requirements.
+    const avail={}; nonCrop.forEach(k=>avail[k]=Math.max(0,net[k]-(cel[k]||0)-(own[k]||0)));
     return {v,avail,
       merchAvail:Math.max(0,maxMerchants(v)-c.merchants-ce.merchants),
       shipAvail:Math.max(0,maxShips(v)-c.ships-ce.ships)};
@@ -1164,7 +1176,7 @@ function optimizeTroopSupply(cropPlan){
     const totalNeed=nonCrop.reduce((s,k)=>s+(need[k]||0),0);
     if(totalNeed<1) continue; // fully covered already
     const cands=donors
-      .filter(d=>d.merchAvail+d.shipAvail>0&&nonCrop.some(k=>d.avail[k]>0))
+      .filter(d=>d.v.id!==rec.id&&d.merchAvail+d.shipAvail>0&&nonCrop.some(k=>d.avail[k]>0))
       .map(d=>({d,dst:dist(d.v,rec)})).sort((a,b)=>a.dst-b.dst);
     for(const {d,dst} of cands){
       if(nonCrop.every(k=>(need[k]||0)<1)) break;
@@ -1340,11 +1352,12 @@ function optimizeOverflow(cropPlan, troopPlan){
     // buffer) and beyond what it already sends to cover troop needs. All of it is forwarded to troops.
     // Sorted by how soon its warehouse fills, so the ones filling within WAREHOUSE_FILL_H are relieved
     // first with the limited carriers (cascading to the next troop village as each fills).
-    const donors=state.villages.filter(v=>!hasSupplyNeed(v)).map(v=>{
+    const donors=state.villages.map(v=>{
       const p=proj[v.id], net=p.net[k], cap=p.cap[k]||0, cur=p.cur[k];
-      const res=keepReserve(v)[k]||0, ut=(usedByTroop[v.id]&&usedByTroop[v.id][k])||0;
+      const res=keepReserve(v)[k]||0, ut=(usedByTroop[v.id]&&usedByTroop[v.id][k])||0, own=troopNeedsPerHour(v)[k]||0;
       const eta = net>0.5 && cap>0 ? (cap-cur)/net : Infinity;
-      return {v, give:Math.max(0, net-res-ut), eta};
+      // reserve the village's own supply requirement (training + custom) so only genuine spare is forwarded
+      return {v, give:Math.max(0, net-res-ut-own), eta};
     }).filter(d=>d.give>0.5).sort((a,b)=>a.eta-b.eta);
     // Receivers: troop villages (priority order). Each can soak up (a) any 24/7 training burn the
     // troop-supply plan couldn't feed (own production + its routes fall short) - sustainable, it's
@@ -1562,6 +1575,7 @@ function openVillage(id){
     <div class="field"><label>Clay /h</label><input type="number" id="f_cn_c" value="${v.customNeed&&v.customNeed.clay||''}" placeholder="0" oninput="updateTroopNeeds()"></div>
     <div class="field"><label>Iron /h</label><input type="number" id="f_cn_i" value="${v.customNeed&&v.customNeed.iron||''}" placeholder="0" oninput="updateTroopNeeds()"></div>
     <div class="field"><label>Crop /h</label><input type="number" id="f_cn_cr" value="${v.customNeed&&v.customNeed.crop||''}" placeholder="0" oninput="updateTroopNeeds()"></div>
+    <div class="field full"><label>Supply priority <span class="note" style="margin:0">(1 = fed first; shared order for troop &amp; custom-need villages. Blank = last. Also drag-reorder on the Auto Routes page)</span></label><input type="number" id="f_priority" min="1" value="${(v.troopVillage||(v.customNeed&&(v.customNeed.lumber||v.customNeed.clay||v.customNeed.iron)))?(v.troopPriority||''):''}" placeholder="last"></div>
     <div class="sect">Production /h</div>
     ${num("Lumber","f_pl",v.prod&&v.prod.lumber)}${num("Clay","f_pc",v.prod&&v.prod.clay)}
     ${num("Iron","f_pi",v.prod&&v.prod.iron)}${num("Crop (net if synced)","f_pcr",v.prod&&v.prod.crop)}
@@ -1710,6 +1724,8 @@ function saveVillage(){
   if(editingV){ const i=state.villages.findIndex(x=>x.id===v.id); state.villages[i]=v; }
   else state.villages.push(v);
   if(v.capital) state.villages.forEach(x=>{ if(x.id!==v.id) x.capital=false; }); // only one capital
+  // Place this village at the chosen supply priority (troop & custom-need villages share one order)
+  if(hasSupplyNeed(v)) reinsertSupplyPriority(v.id, +((document.getElementById("f_priority")||{}).value)||0);
   save(); closeVillage(); renderAll();
 }
 function delVillage(id){
