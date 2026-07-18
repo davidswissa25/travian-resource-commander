@@ -997,6 +997,92 @@ function v2Reinject(M,shortfalls){
   const ord={t0:0,t1:1,t3:2,t4:3};
   return dems.sort((a,b)=>(ord[a.tier]-ord[b.tier])||(a.vid<b.vid?-1:1));
 }
+function v2Ins(q,e){ let lo=0,hi=q.length; while(lo<hi){ const md=(lo+hi)>>1; if(q[md].t<=e.t) lo=md+1; else hi=md; } q.splice(lo,0,e); }
+// 48h discrete-event simulation of a plan (S3): production/upkeep/training integrate between
+// events; departures send what's actually in stock (partial - assumption A1) and are SKIPPED when
+// the donor has no free carriers at that instant; carriers return after the round trip. Verdict:
+// starvation (crop dips below 0), under-supplied requirements (<98% of training burn fed),
+// overflow loss, skipped sends. This is the structural guard against phantom-coverage plans.
+function v2Simulate(M,routes,horizon){
+  horizon=horizon||48;
+  const st={}, free={}, loss={}, burnW={}, burnD={}, skips=[], starved={};
+  M.vils.forEach(m=>{ st[m.id]={...m.stock}; free[m.id]={merchant:m.free.merchant,ship:m.free.ship};
+    loss[m.id]={lumber:0,clay:0,iron:0,crop:0}; burnW[m.id]={lumber:0,clay:0,iron:0}; burnD[m.id]={lumber:0,clay:0,iron:0}; });
+  const amb={}; M.vils.forEach(m=>{ amb[m.id]={}; RES.forEach(k=>amb[m.id][k]=v2Net(m,k)); });
+  const q=[];
+  routes.forEach((r,ri)=>{
+    const kind=(r.ships||0)>0&&!(r.merchants>0)?'ship':'merchant';
+    const U=M.byId[r.from], W=M.byId[r.to]; if(!U||!W) return;
+    const tau=tauH(U.v,W.v,kind);
+    const per={...(r.resources||{})};
+    const setsPer=Math.max(1,Math.ceil(RES.reduce((s,k)=>s+(per[k]||0),0)/Math.max(1,U.fleet[kind].cap)));
+    for(let t=(r.offsetHours||0); t<horizon; t+=Math.max(1,r.interval)) v2Ins(q,{t,ri,type:'dep',kind,U:U.id,W:W.id,per,tau,setsPer});
+  });
+  let lastT=0;
+  const advance=(to)=>{ const dt=to-lastT; if(dt<=1e-9) return;
+    M.vils.forEach(m=>{ RES.forEach(k=>{
+      let v=st[m.id][k]+amb[m.id][k]*dt;
+      if(m.flags.target&&k!=='crop'){ const want=(m.needs[k]||0)*dt; burnW[m.id][k]+=want;
+        const got=Math.min(Math.max(0,v),want); burnD[m.id][k]+=got; v-=got; }
+      if(v<0){ if(k==='crop'&&starved[m.id]==null) starved[m.id]=+to.toFixed(1); v=0; }
+      const cp=m.cap[k]||0; if(cp>0&&v>cp){ loss[m.id][k]+=v-cp; v=cp; }
+      st[m.id][k]=v; }); });
+    lastT=to; };
+  while(q.length){
+    const e=q.shift(); advance(e.t);
+    if(e.type==='dep'){
+      if(free[e.U][e.kind]<e.setsPer){ skips.push({t:e.t,ri:e.ri}); continue; }
+      const sent={}; let any=false;
+      RES.forEach(k=>{ const amt=Math.min(e.per[k]||0, st[e.U][k]); if(amt>0.5){ sent[k]=amt; st[e.U][k]-=amt; any=true; } });
+      if(!any){ skips.push({t:e.t,ri:e.ri,empty:true}); continue; }
+      free[e.U][e.kind]-=e.setsPer;
+      v2Ins(q,{t:e.t+e.tau,type:'arr',W:e.W,sent});
+      v2Ins(q,{t:e.t+2*e.tau,type:'ret',U:e.U,kind:e.kind,n:e.setsPer});
+    } else if(e.type==='arr'){
+      const m=M.byId[e.W];
+      RES.forEach(k=>{ if(e.sent&&e.sent[k]){ st[e.W][k]+=e.sent[k];
+        const cp=m.cap[k]||0; if(cp>0&&st[e.W][k]>cp){ loss[e.W][k]+=st[e.W][k]-cp; st[e.W][k]=cp; } } });
+    } else free[e.U][e.kind]+=e.n;
+  }
+  advance(horizon);
+  const issues=[];
+  Object.keys(starved).sort().forEach(id=>issues.push({type:'starve',vid:id,t:starved[id]}));
+  M.vils.forEach(m=>{
+    if(m.flags.target) ['lumber','clay','iron'].forEach(k=>{ const w=burnW[m.id][k];
+      if(w>1){ const c=burnD[m.id][k]/w; if(c<0.98) issues.push({type:'undersupplied',vid:m.id,k,cov:+(c*100).toFixed(0)}); } });
+    RES.forEach(k=>{ if(loss[m.id][k]>Math.max(1000,(m.cap[k]||0)*0.05)) issues.push({type:'overflow',vid:m.id,k,amt:Math.round(loss[m.id][k])}); });
+  });
+  if(skips.length) issues.push({type:'skips',n:skips.length});
+  return {issues, skips, loss, starved};
+}
+// Targeted plan repair from sim issues (<=3 loops): starvation -> serve that receiver more often
+// (interval one notch down, offset 0 so the first batch lands early); overflow -> trim the inflow;
+// skipped sends -> restagger the source's departures. Carriers recomputed after any change.
+function v2Repair(M,routes,sim){
+  let changed=false;
+  const ivDown=I=>{ const i=ALLOWED_INTERVALS.indexOf(I); return i>0?ALLOWED_INTERVALS[i-1]:I; };
+  sim.issues.forEach(is=>{
+    if(is.type==='starve'){
+      routes.forEach(r=>{ if(r.to===is.vid&&r.flow.crop>1){ const nI=ivDown(r.interval);
+        if(nI!==r.interval||r.offsetHours!==0){ r.interval=nI; r.offsetHours=0; changed=true; } } });
+    } else if(is.type==='overflow'){
+      const inn=routes.filter(r=>r.to===is.vid&&r.flow[is.k]>1), tot=inn.reduce((s,r)=>s+r.flow[is.k],0);
+      if(tot>1){ const cut=Math.min(0.9, is.amt/48/tot); if(cut>0.02){ inn.forEach(r=>r.flow[is.k]*=(1-cut)); changed=true; } }
+    } else if(is.type==='skips'){
+      const bySrc={}; routes.forEach(r=>(bySrc[r.from]=bySrc[r.from]||[]).push(r));
+      Object.values(bySrc).forEach(list=>list.forEach((r,i)=>{ const o=+((r.interval*i/Math.max(1,list.length))).toFixed(3);
+        if(Math.abs(o-(r.offsetHours||0))>0.01){ r.offsetHours=o; changed=true; } }));
+    }
+  });
+  if(changed) routes.forEach(r=>{
+    r.resources={}; RES.forEach(k=>r.resources[k]=Math.round(r.flow[k]*r.interval));
+    const U=M.byId[r.from], kind=(r.ships||0)>0&&!(r.merchants>0)?'ship':'merchant';
+    const tau=tauH(U.v,M.byId[r.to].v,kind), waves=Math.max(1,Math.ceil((2*tau)/r.interval));
+    const sets=Math.max(1,Math.ceil(RES.reduce((s,k)=>s+(r.resources[k]||0),0)/Math.max(1,U.fleet[kind].cap)));
+    if(kind==='ship') r.ships=sets*waves; else r.merchants=sets*waves;
+  });
+  return changed;
+}
 function buildAutoPlanV2(mode){
   const tStart=performance.now();
   const M=buildModelV2(); v2Bands(M);
@@ -1031,6 +1117,25 @@ function buildAutoPlanV2(mode){
     else if(hubish.has(r.from)&&routes.some(x=>x.to===r.from&&x.flow.crop>1)) r.relay='out'; } });
   routes.forEach(r=>{ r.resources={}; RES.forEach(k=>r.resources[k]=Math.round(r.flow[k]*r.interval)); });
   const kept=routes.filter(r=>RES.some(k=>r.resources[k]>=1));
+  // ---- S3: simulate the plan for 48h, repair what fails, and A/B against the v1 engine ----
+  let sim=null, simNote='', abNote='';
+  if(kept.length){
+    try{
+      sim=v2Simulate(M,kept,48);
+      for(let rp=0; rp<3 && sim.issues.length; rp++){ if(!v2Repair(M,kept,sim)) break; sim=v2Simulate(M,kept,48); }
+      const isName=is=>is.type+(is.vid?(' '+((M.byId[is.vid]||{}).name||is.vid)):'')+(is.k?' '+is.k:'')+(is.cov!=null?' '+is.cov+'%':'')+(is.n?' x'+is.n:'');
+      simNote = sim.issues.length
+        ? ` <span style="color:var(--warn)" title="${esc(sim.issues.map(isName).join(', '))}">&#9888; sim: ${sim.issues.length} issue${sim.issues.length>1?'s':''} after repair</span>`
+        : ' <span style="color:var(--ok)" title="48h discrete-event simulation: no starvation, requirements fed, no overflow loss, no skipped sends">&#10003; sim: 48h clean</span>';
+    }catch(err){ simNote=' <span style="color:var(--faint)">(sim error)</span>'; }
+    try{ // A/B: run the v1 engine on the same state and simulate ITS plan with the same physics
+      const eng=state.optEngine; state.optEngine='v1'; let p1; try{ p1=buildAutoPlan(mode); } finally { state.optEngine=eng; }
+      const carr=pl=>pl.routes.reduce((s,r)=>s+(r.merchants||0)+(r.ships||0),0);
+      const mv=pl=>Math.round(pl.routes.reduce((s,r)=>s+RES.reduce((x,k)=>x+((r.flow&&r.flow[k])||((r.resources&&r.resources[k])||0)/(r.interval||1)),0),0));
+      const s1=v2Simulate(M,p1.routes,48);
+      abNote=`<p class="note" style="margin-top:4px">A/B same state &middot; <b>v2</b>: ${kept.length} routes, ${carr({routes:kept})} carriers, ${fmt(mv({routes:kept}))}/h, sim ${sim&&sim.issues.length?sim.issues.length+' issue(s)':'&#10003;'} &middot; <b>v1</b>: ${p1.routes.length} routes, ${carr(p1)} carriers, ${fmt(mv(p1))}/h, sim ${s1.issues.length?s1.issues.length+' issue(s)':'&#10003;'}</p>`;
+    }catch(err){}
+  }
   // carrier-limited: every carrier booked AND exportable surplus stuck at home
   const carrierLimited=[];
   M.vils.forEach(m=>{ if((m.free.merchant+m.free.ship)<=0) return;
@@ -1041,7 +1146,7 @@ function buildAutoPlanV2(mode){
   const parts=[]; if(moved.crop>=1) parts.push(fmt(moved.crop)+' crop'); ['lumber','clay','iron'].forEach(k=>{ if(moved[k]>=1) parts.push(fmt(moved[k])+' '+k); });
   const ms=Math.round(performance.now()-tStart);
   const summary = kept.length
-    ? `<b>[v2]</b> ${kept.length} route${kept.length>1?'s':''} across ${Object.keys(bySrc).length} village(s), moving ${parts.join(' + ')||'&mdash;'} per hour <span style="color:var(--faint)">(tiered min-cost flow, ${ms}ms &middot; 48h simulator lands in S3)</span>`
+    ? `<b>[v2]</b> ${kept.length} route${kept.length>1?'s':''} across ${Object.keys(bySrc).length} village(s), moving ${parts.join(' + ')||'&mdash;'} per hour${simNote} <span style="color:var(--faint)">(tiered min-cost flow, ${ms}ms)</span>`
     : `<b>[v2]</b> nothing to route &mdash; no tier demands that a donor can reach.`;
   let unmetNote='';
   if(hardUnmet.length){ const byV={};
@@ -1049,7 +1154,8 @@ function buildAutoPlanV2(mode){
     unmetNote=`<p class="note">&#9888; <b>[v2]</b> unmet: ${Object.keys(byV).sort().map(n=>`<b>${esc(n)}</b>: ${byV[n].join(', ')}`).join('; ')}.</p>`; }
   if(carrierLimited.length)
     unmetNote+=`<p class="note">&#9650; Carrier-limited &mdash; surplus stuck at home (no free merchants/ships): ${carrierLimited.map(c=>`<b>${esc(c.name)}</b> (${RES.filter(k=>c.res[k]>=1).map(k=>`<span style="color:var(--${k})">${fmt(c.res[k])} ${k}</span>`).join(' &middot; ')}/h)`).join('; ')}.</p>`;
-  return {routes:kept, summary, unmetNote, cropPlan:null, carrierLimited};
+  unmetNote+=abNote;
+  return {routes:kept, summary, unmetNote, cropPlan:null, carrierLimited, sim};
 }
 function buildAutoPlan(mode){
   if((state.optEngine||'v1')==='v2') return buildAutoPlanV2(mode);
