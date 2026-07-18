@@ -1,6 +1,15 @@
 # Auto Trade Routes v2 — Optimizer Overhaul Design
 
-*Design only — no implementation yet. Sources: live game UI (Reign of Fire x2 Europe, inspected 2026-07-18), official Travian support docs, community references, and the current codebase.*
+*Sources: live game UI (Reign of Fire x2 Europe, inspected 2026-07-18), official Travian support docs, community references, and the current codebase.*
+
+## Progress
+- [x] Research + Part I design (problem model, algorithm, modes)
+- [x] Part II pre-implementation spec (P0–P9)
+- [x] **S1 — Foundations**: torus `dist()`, `tauH()` + `tauCache` learned travel times, puller v1.11.0 (`travelSec`/`kind`/`ships`), ship-route carrier ledger — commit `178912f`
+- [ ] **S2 — Flow core**: Model build, tiers T0–T4, SSP min-cost flow, materialization, `v1 | v2` engine toggle
+- [ ] **S3 — Simulator**: 48h discrete-event sim + repair loop, A/B against v1
+- [ ] **S4 — Modes & diff-apply**: hub/centralize/auto arc policies, minimal changeset apply, v2 default
+- [ ] **S5 — Polish**: deliveries n×, arrival-aware staggering, NPC hint, dead-code removal
 
 ---
 
