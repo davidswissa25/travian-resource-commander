@@ -750,6 +750,9 @@ function buildAutoPlan(mode){
   const all = mode==='all';
   const troopPlan = all ? optimizeTroopSupply(cropPlan) : {routes:[]};
   const overflowPlan = all ? optimizeOverflow(cropPlan, troopPlan) : {routes:[]};
+  // Centralize mode only: sweep leftover crop surplus to the capital LAST, on the carriers still free
+  // after crop-deficit + troop + overflow legs - so L/C/I supply is booked before the excess crop.
+  const cropCollectPlan = optimizeCropCollect(cropPlan, troopPlan, overflowPlan);
   const merged={};
   const addRoute=(r,tag)=>{
     const iv=snapInterval(r.interval||r.intervalHours||1);
@@ -770,6 +773,7 @@ function buildAutoPlan(mode){
   cropPlan.routes.forEach(r=>addRoute(r,"crop"));
   troopPlan.routes.forEach(r=>addRoute(r,"troops"));
   overflowPlan.routes.forEach(r=>addRoute(r,"overflow"));
+  cropCollectPlan.routes.forEach(r=>addRoute(r,"crop"));
   let routes=Object.values(merged);
   // ---- overfill guard: cap each receiver's added inflow so its store can't exceed capacity over time ----
   const f0=planFlows(); // existing routes (empty in From-scratch mode)
@@ -930,6 +934,46 @@ function sendLink(fromV,toV,crop){
   if(!state.serverUrl||!fromV||!fromV.did||!toV) return "";
   return state.serverUrl.replace(/\/+$/,"")+"/build.php?newdid="+fromV.did+"&gid=17&t=5&x="+(toV.x||0)+"&y="+(toV.y||0)+"&r1=0&r2=0&r3=0&r4="+Math.max(0,Math.round(crop));
 }
+// Travian trade routes only accept intervals of 1,2,3,4,6,8,12,24h. Pick the largest allowed
+// interval that (a) is near the round trip for carrier efficiency, (b) arrives before the granary
+// empties, and (c) doesn't overflow the destination granary in one batch.
+function chooseInterval(T,eta,freeSpace,F){
+  let I=Math.max(1,T);
+  if(eta>0) I=Math.min(I, eta);
+  if(F>0 && freeSpace>0) I=Math.min(I, freeSpace/F);
+  return snapIntervalFloor(Math.max(1, Math.min(24, I||1)));
+}
+// Fill a flow target from a donor's fleets (richest carrier first), respecting whole-hour intervals
+// and per-fleet availability. d = {v, merchAvail, shipAvail}; rec = sink {v,crop,need,capRoom}.
+function allocate(d,dst,rec,target,onlyKind){
+  // A single trade route uses merchants (marketplace) OR trade ships (harbor) - never both. onlyKind
+  // restricts this allocation to one fleet type so the emitted route carries only that carrier.
+  const fleets=donorFleets(d,dst).filter(f=> !onlyKind || (onlyKind==="ship" ? f.kind==="ship" : f.kind!=="ship"));
+  if(!fleets.length) return {F:0,I:1,mUsed:0,sUsed:0,capped:false,roundTrip:Infinity};
+  const Tfast=fleets.reduce((m,f)=>Math.min(m,f.T), Infinity);
+  const I=chooseInterval(Tfast, rec.crop/Math.max(1,rec.need), rec.capRoom, target);
+  let remaining=target, F=0, mUsed=0, sUsed=0, capped=false;
+  for(const f of fleets){
+    if(remaining<=0.5 || f.avail<=0) continue;
+    const want=Math.min(remaining, f.avail*f.per), waves=Math.ceil(f.T/I);
+    let cPerSend=Math.max(1,Math.ceil((want*I)/f.cap)), conc=cPerSend*waves;
+    if(conc>f.avail){ capped=true; cPerSend=Math.floor(f.avail/waves); conc=cPerSend*waves; }
+    if(cPerSend<1) continue;
+    const got=Math.min((cPerSend*f.cap)/I, want);
+    F+=got; remaining-=got;
+    if(f.kind==="ship") sUsed+=conc; else mUsed+=conc;
+  }
+  return {F, I, mUsed, sUsed, capped, roundTrip:Tfast};
+}
+// Pick the single fleet kind (merchants OR ships) that delivers the most for this leg, so no route
+// ever mixes carriers. Ties broken by fewer carriers used.
+function bestAlloc(d,dst,rec,target){
+  let best=null;
+  ["merchant","ship"].forEach(kind=>{ const a=allocate(d,dst,rec,target,kind);
+    if(a.F<0.5) return;
+    if(!best || a.F>best.F+0.5 || (Math.abs(a.F-best.F)<=0.5 && (a.mUsed+a.sUsed)<(best.mUsed+best.sUsed))) best=a; });
+  return best || {F:0,I:1,mUsed:0,sUsed:0,capped:false,roundTrip:Infinity};
+}
 function optimize(){
   const flows=planFlows();
   const data=state.villages.map(v=>{ const p=projected(v,flows); return {v,net:p.net.crop,crop:p.cur.crop,capRoom:p.cap.crop-p.cur.crop}; });
@@ -952,46 +996,7 @@ function optimize(){
   // Batch model: send "perSend" crop every "interval" h. Interval is as long as possible
   // (=round trip, so carriers recycle) but short enough to arrive before the granary empties.
   // If the village drains faster than carriers return, waves overlap => more carriers needed.
-  // Travian trade routes only accept intervals of 1,2,3,4,6,8,12,24h. Pick the largest allowed
-  // interval that (a) is near the round trip for carrier efficiency, (b) arrives before the
-  // granary empties, and (c) doesn't overflow the destination granary in one batch.
-  function chooseInterval(T,eta,freeSpace,F){
-    let I=Math.max(1,T);
-    if(eta>0) I=Math.min(I, eta);
-    if(F>0 && freeSpace>0) I=Math.min(I, freeSpace/F);
-    return snapIntervalFloor(Math.max(1, Math.min(24, I||1)));
-  }
-  // Fill a flow target from a donor's fleets (richest carrier first), respecting whole-hour
-  // intervals and per-fleet availability. Returns delivered crop/h plus carriers tied up.
-  function allocate(d,dst,rec,target,onlyKind){
-    // A single trade route uses merchants (marketplace) OR trade ships (harbor) - never both. onlyKind
-    // restricts this allocation to one fleet type so the emitted route carries only that carrier.
-    const fleets=donorFleets(d,dst).filter(f=> !onlyKind || (onlyKind==="ship" ? f.kind==="ship" : f.kind!=="ship"));
-    if(!fleets.length) return {F:0,I:1,mUsed:0,sUsed:0,capped:false,roundTrip:Infinity};
-    const Tfast=fleets.reduce((m,f)=>Math.min(m,f.T), Infinity);
-    const I=chooseInterval(Tfast, rec.crop/Math.max(1,rec.need), rec.capRoom, target);
-    let remaining=target, F=0, mUsed=0, sUsed=0, capped=false;
-    for(const f of fleets){
-      if(remaining<=0.5 || f.avail<=0) continue;
-      const want=Math.min(remaining, f.avail*f.per), waves=Math.ceil(f.T/I);
-      let cPerSend=Math.max(1,Math.ceil((want*I)/f.cap)), conc=cPerSend*waves;
-      if(conc>f.avail){ capped=true; cPerSend=Math.floor(f.avail/waves); conc=cPerSend*waves; }
-      if(cPerSend<1) continue;
-      const got=Math.min((cPerSend*f.cap)/I, want);
-      F+=got; remaining-=got;
-      if(f.kind==="ship") sUsed+=conc; else mUsed+=conc;
-    }
-    return {F, I, mUsed, sUsed, capped, roundTrip:Tfast};
-  }
-  // Pick the single fleet kind (merchants OR ships) that delivers the most for this leg, so no route
-  // ever mixes carriers. Ties broken by fewer carriers used.
-  function bestAlloc(d,dst,rec,target){
-    let best=null;
-    ["merchant","ship"].forEach(kind=>{ const a=allocate(d,dst,rec,target,kind);
-      if(a.F<0.5) return;
-      if(!best || a.F>best.F+0.5 || (Math.abs(a.F-best.F)<=0.5 && (a.mUsed+a.sUsed)<(best.mUsed+best.sUsed))) best=a; });
-    return best || {F:0,I:1,mUsed:0,sUsed:0,capped:false,roundTrip:Infinity};
-  }
+  // chooseInterval / allocate / bestAlloc are hoisted to module scope (used here and by the leftover-crop sweep).
   // ---- candidate supply paths: direct donor->receiver, or relayed donor->hub->receiver (1 hop) ----
   // Relaying lets a far donor hand crop to a nearby hub that finishes the trip with ITS own spare
   // carriers (e.g. a coastal village's idle trade ships) - covering deficits a direct route can't,
@@ -1042,6 +1047,7 @@ function optimize(){
   // no longer held back when tapping it covers more of the deficit. Hub rule still stands: when a hub
   // exists the capital feeds the hub (relay), not receivers directly, unless the receiver IS the hub.
   const capV = data.find(d=>d.v.capital);
+  let cropLeftover=null; // centralize mode: per-village crop surplus not yet shipped (swept to capital after L/C/I)
   if(state.cropToCapital && capV){
     // ===== Centralize-all-crop mode =====
     // Every village funnels its whole crop surplus to the CAPITAL; the capital forwards it to the crop
@@ -1056,24 +1062,33 @@ function optimize(){
       routes.push({from:src,to:dstV.id,fromName:state.villages.find(x=>x.id===src).name,toName:dstV.name,
         cropPerHour:a.F,perSend:Math.round(a.F*a.I),interval:a.I,distance:Math.round(dst),
         merchants:a.mUsed,ships:a.sUsed,roundTrip:a.roundTrip,merchCapped:a.capped,relay:rel,impact:imp}); return true; };
-    // 1) COLLECTION: pull each surplus village's crop into the capital (nearest first). Skip the hub node
-    //    (it distributes, it doesn't ship its own crop away and back) - its surplus is counted at the hub.
+    // Deficits to cover (skip capital & hub themselves - they are the central nodes, not receivers here)
+    const recvs=receivers.filter(r=>r.v.id!==capV.v.id && (!hubNode||r.v.id!==hubNode.v.id));
+    const totalDeficit=recvs.reduce((s,r)=>s+r.need,0);
+    const hubOwn = hubNode ? Math.max(0, hubNode.net-keepReserve(hubNode.v).crop) : 0;
+    // Crop the CAPITAL must hold to satisfy distribution: everything if it distributes directly, or only
+    // the part the hub can't cover from its own surplus when a hub distributes. Collection STOPS once the
+    // capital holds this much (no-starvation point) - each village's remaining surplus is left for the
+    // low-priority sweep that runs AFTER lumber/clay/iron supply, so crop outranks L/C/I only up to
+    // covering deficits, then L/C/I gets the carriers, then leftover crop is centralized with what's left.
+    const needFromCapital = hubNode ? Math.max(0, totalDeficit-hubOwn) : totalDeficit;
+    // 1) COLLECTION (essential only): pull surplus into the capital, nearest first, until it holds enough.
     let pool = Math.max(0, capV.net-keepReserve(capV.v).crop);   // capital's own surplus seeds the pool
     const collectors = donors.filter(d=>d.avail>0.5 && d.v.id!==capV.v.id && (!hubNode||d.v.id!==hubNode.v.id))
       .sort((a,b)=>dist(a.v,capV.v)-dist(b.v,capV.v));
     for(const D of collectors){
+      if(pool >= needFromCapital-0.5) break;                    // enough crop staged to cover every deficit
       const dst=dist(D.v,capV.v);
-      const a=bestAlloc(wrap(D.v.id),dst,{v:capV.v,crop:capV.crop,need:1e-6,capRoom:1e12},D.avail);
+      const a=bestAlloc(wrap(D.v.id),dst,{v:capV.v,crop:capV.crop,need:1e-6,capRoom:1e12},Math.min(D.avail,needFromCapital-pool));
       if(pushRoute(D.v.id,capV.v,a,dst,hubNode?"in":null,"&rarr; capital (collect)")){ pool+=a.F; D.avail-=a.F; }
     }
-    // Deficits to cover (skip capital & hub themselves - they are the central nodes, not receivers here)
-    const recvs=receivers.filter(r=>r.v.id!==capV.v.id && (!hubNode||r.v.id!==hubNode.v.id));
-    const totalDeficit=recvs.reduce((s,r)=>s+r.need,0);
+    // Unshipped surplus becomes the leftover the sweep centralizes later (after L/C/I supply is served).
+    cropLeftover={}; collectors.forEach(D=>{ if(D.avail>0.5) cropLeftover[D.v.id]=D.avail; });
     // 2) CAPITAL -> HUB: forward only what distribution needs (capital keeps any leftover as its stockpile)
     let atDist;
     if(hubNode){
-      let hubHave=Math.max(0, hubNode.net-keepReserve(hubNode.v).crop);   // hub's own surplus
-      const forward=Math.min(pool, Math.max(0, totalDeficit-hubHave));
+      let hubHave=hubOwn;
+      const forward=Math.min(pool, needFromCapital);
       if(forward>0.5){ const dst=dist(capV.v,hubNode.v);
         const a=bestAlloc(wrap(capV.v.id),dst,{v:hubNode.v,crop:hubNode.crop,need:1e-6,capRoom:1e12},forward);
         if(pushRoute(capV.v.id,hubNode.v,a,dst,"out","capital &rarr; hub")) hubHave+=a.F; }
@@ -1124,7 +1139,36 @@ function optimize(){
     summary=`${routes.length} route${routes.length>1?'s':''} proposed: moving ${fmt(delivered)} crop/h to ${receivers.length-unmet.length} draining village(s)${relays?` (incl. ${relays} relayed via a hub)`:""}.`; }
   else if(merchantBlocked) summary="Donors have spare crop but no free carriers. Set Marketplace levels / trade ships (or the Default market lvl) - routes aren't suggested with 0 available carriers.";
   else summary="Draining villages exist, but no donor has spare crop above the safety margin.";
-  return {routes,unmet,balanced,summary,merchantBlocked,spareCrop:Math.round(spareCrop),spareCarriers};
+  return {routes,unmet,balanced,summary,merchantBlocked,spareCrop:Math.round(spareCrop),spareCarriers,cropLeftover};
+}
+// Low-priority pass (centralize mode): sweep each village's LEFTOVER crop surplus - the part not needed
+// to cover deficits - into the capital, using only the carriers still free after the crop-deficit, troop
+// and overflow plans. This is why crop "comes first only until nobody starves": the essential crop legs
+// are booked before L/C/I, but this excess centralization is booked last.
+function optimizeCropCollect(cropPlan, troopPlan, overflowPlan){
+  if(!state.cropToCapital) return {routes:[]};
+  const capV=state.villages.find(v=>v.capital); if(!capV) return {routes:[]};
+  const leftover=(cropPlan&&cropPlan.cropLeftover)||{};
+  const ids=Object.keys(leftover).filter(id=>leftover[id]>0.5); if(!ids.length) return {routes:[]};
+  const committed=planCommitted(), used={};
+  state.villages.forEach(v=>used[v.id]={m:0,s:0});
+  [cropPlan,troopPlan,overflowPlan].forEach(p=>((p&&p.routes)||[]).forEach(r=>{ const u=used[r.from]; if(u){u.m+=r.merchants||0;u.s+=r.ships||0;} }));
+  const carr={}; state.villages.forEach(v=>{ const c=committed[v.id]||{merchants:0,ships:0};
+    carr[v.id]={merch:Math.max(0,maxMerchants(v)-c.merchants-used[v.id].m), ship:Math.max(0,maxShips(v)-c.ships-used[v.id].s)}; });
+  const wrap=id=>({v:state.villages.find(x=>x.id===id),merchAvail:carr[id].merch,shipAvail:carr[id].ship});
+  const routes=[]; let capRoom=((capV.granary&&capV.granary.capacity)||0)-((capV.granary&&capV.granary.crop)||0);
+  const collectors=ids.map(id=>state.villages.find(v=>v.id===id)).filter(Boolean).sort((a,b)=>dist(a,capV)-dist(b,capV));
+  for(const D of collectors){
+    if(carr[D.id].merch+carr[D.id].ship<=0) continue;
+    const dst=dist(D,capV);
+    const a=bestAlloc(wrap(D.id),dst,{v:capV,crop:(capV.granary&&capV.granary.crop)||0,need:1e-6,capRoom:Math.max(1,capRoom)},leftover[D.id]);
+    if(a.F<1) continue;
+    carr[D.id].merch=Math.max(0,carr[D.id].merch-a.mUsed); carr[D.id].ship=Math.max(0,carr[D.id].ship-a.sUsed);
+    routes.push({from:D.id,to:capV.id,fromName:D.name,toName:capV.name,cropPerHour:a.F,perSend:Math.round(a.F*a.I),
+      interval:a.I,distance:Math.round(dst),merchants:a.mUsed,ships:a.sUsed,roundTrip:a.roundTrip,merchCapped:a.capped,relay:null,impact:"surplus &rarr; capital"});
+    capRoom-=a.F*a.I;
+  }
+  return {routes};
 }
 function applyPlan(){
   const plan=optimize();
