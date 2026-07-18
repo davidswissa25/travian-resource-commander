@@ -391,6 +391,7 @@ function normalizeProfile(p, label){
   if(p.ignoreProdBoost==null) p.ignoreProdBoost=false; // plan on base production, ignoring the (temporary) gold/ad production boost
   if(p.ignoreHeroProd==null) p.ignoreHeroProd=false; // plan without the hero's resource production (the hero can move/die/be reassigned)
   if(p.troopCropExtra==null) p.troopCropExtra=5; // % extra crop on troop-training cost (newly-made troops add upkeep)
+  if(!p.tauCache) p.tauCache={}; // learned one-way travel times per "fromDid>toDid>kind" ({sec,src,at}), from synced routes
   ensureIds(p.villages); // backfill missing/duplicate ids so edit & delete always match
   dedupeAndSort(p);      // remove rename-duplicates (same coords) and order by village number
   return p;
@@ -534,7 +535,28 @@ function projected(v, flows){
   RES.forEach(k=>{ let val=stored[k]+net[k]*hrs; val=Math.max(0,Math.min(cap[k]||val,val)); cur[k]=val; });
   return {cur,cap,net,hrs};
 }
-function dist(a,b){ const dx=(a.x||0)-(b.x||0),dy=(a.y||0)-(b.y||0); return Math.max(1,Math.sqrt(dx*dx+dy*dy)); }
+// The world is a 401x401 TORUS: both axes wrap at the map edge, so the shortest path between two
+// villages may cross it. Per-axis shortest delta = min(|d|, 401-|d|).
+const MAP_SIZE=401;
+function axisD(a,b){ const d=Math.abs((+a||0)-(+b||0)); return Math.min(d, MAP_SIZE-d); }
+function dist(a,b){ const dx=axisD(a.x,b.x), dy=axisD(a.y,b.y); return Math.max(1,Math.sqrt(dx*dx+dy*dy)); }
+// One-way travel time in HOURS for a carrier kind between two villages. Prefers the REAL duration
+// learned from synced trade routes (arrivalAt - departureAt, cached per "fromDid>toDid>kind" by
+// mergeSyncRoutes) - exact even over water paths - falling back to torus distance / speed, with a
+// path factor for ships (water detours) until a real send has been observed. Ship speed is a global
+// constant so a learned time is reusable in reverse; merchant speed is per-village (tribe), so only
+// the exact direction is trusted there.
+const WATER_PATH_FACTOR=1.15;
+function tauH(fromV,toV,kind){
+  kind = kind==='ship' ? 'ship' : 'merchant';
+  const tc=state.tauCache||{};
+  if(fromV&&toV&&fromV.did&&toV.did){
+    const e=tc[fromV.did+'>'+toV.did+'>'+kind] || (kind==='ship' ? tc[toV.did+'>'+fromV.did+'>ship'] : null);
+    if(e&&e.sec>0) return e.sec/3600;
+  }
+  const d=dist(fromV||{},toV||{});
+  return kind==='ship' ? (d*WATER_PATH_FACTOR)/effShipSpeed() : d/effSpeed(fromV||{});
+}
 // Travian's alliance "commerce bonus" (merchant capacity/speed) is toggled on/off by the alliance
 // leadership and its % changes over time (e.g. 15%, 25%) - it is NOT permanent. When "Ignore
 // temporary bonuses" is on, treat it as 0% everywhere, and also stop trusting the captured
@@ -613,7 +635,7 @@ function committedCarriers(){
     if(!from||!to) return;
     let merch=r.merchants, ships=r.ships||0;
     if(merch==null){ // older routes without a stored carrier count: derive from round trip
-      const T=(2*dist(from,to))/effSpeed(from), I=Math.max(1,r.intervalHours||1);
+      const T=2*tauH(from,to,(r.ships||0)>0?'ship':'merchant'), I=Math.max(1,r.intervalHours||1);
       const perSend=(r.resources&&(r.resources.lumber+r.resources.clay+r.resources.iron+r.resources.crop))||0;
       merch=Math.max(1,Math.ceil(perSend/Math.max(1,effCap(from))))*Math.ceil(T/I);
     }
@@ -2024,20 +2046,25 @@ function mergeSyncRoutes(incoming){
   incoming = incoming || [];
   const map={}, keep=new Set(); let skipped=0;
   incoming.forEach(nr=>{
+    // learn the REAL one-way travel time from the game's own schedule (arrivalAt - departureAt),
+    // keyed by did pair + carrier kind - even for routes whose villages we can't resolve yet
+    if(nr.travelSec>0 && nr.fromDid && nr.toDid)
+      (state.tauCache||(state.tauCache={}))[nr.fromDid+'>'+nr.toDid+'>'+(nr.kind==='ship'?'ship':'merchant')]={sec:Math.round(nr.travelSec),src:'learned',at:Date.now()};
     const from=findVilByGeo(nr.fromDid,nr.fromX,nr.fromY), to=findVilByGeo(nr.toDid,nr.toX,nr.toY);
     if(!from||!to||from.id===to.id){ skipped++; return; }
     const k=from.id+">"+to.id; keep.add(k);
     const iv=snapInterval(nr.intervalHours||24);
-    const cur=map[k]||(map[k]={from:from.id,to:to.id,resources:{lumber:0,clay:0,iron:0,crop:0},intervalHours:iv,offsetHours:nr.offsetHours||0,merchants:0});
+    const cur=map[k]||(map[k]={from:from.id,to:to.id,resources:{lumber:0,clay:0,iron:0,crop:0},intervalHours:iv,offsetHours:nr.offsetHours||0,merchants:0,ships:0});
     RES.forEach(r=>cur.resources[r]+=(nr.resources&&nr.resources[r])||0);
     cur.intervalHours=Math.min(cur.intervalHours,iv);
     cur.merchants+=(nr.merchants||0);
+    cur.ships+=(nr.ships||0);
   });
   let added=0, updated=0;
   Object.keys(map).forEach(k=>{
     const m=map[k], ex=state.routes.find(r=>r.synced&&(r.from+">"+r.to)===k);
-    if(ex){ ex.resources=m.resources; ex.intervalHours=m.intervalHours; ex.offsetHours=m.offsetHours||0; ex.merchants=m.merchants||ex.merchants||1; ex.updatedAt=Date.now(); updated++; }
-    else { state.routes.push({id:uid(),from:m.from,to:m.to,resources:m.resources,intervalHours:m.intervalHours,offsetHours:m.offsetHours||0,merchants:m.merchants||1,synced:true,updatedAt:Date.now()}); added++; }
+    if(ex){ ex.resources=m.resources; ex.intervalHours=m.intervalHours; ex.offsetHours=m.offsetHours||0; ex.merchants=m.merchants||(m.ships?0:ex.merchants||1); ex.ships=m.ships||0; ex.updatedAt=Date.now(); updated++; }
+    else { state.routes.push({id:uid(),from:m.from,to:m.to,resources:m.resources,intervalHours:m.intervalHours,offsetHours:m.offsetHours||0,merchants:m.merchants||(m.ships?0:1),ships:m.ships||0,synced:true,updatedAt:Date.now()}); added++; }
   });
   // prune synced routes that no longer exist in-game (manual routes are preserved)
   const before=state.routes.length;

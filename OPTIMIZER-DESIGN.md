@@ -348,4 +348,4 @@ routes all surface as concrete failed checks *before* the user sees the plan.
 ## P9. Implementation stages (unchanged from §7, now mapped to spec sections)
 S1 = P0 (torus + τ + puller) · S2 = P1–P3 behind toggle · S3 = P4 + A/B · S4 = P5 modes/diff, default v2 · S5 = polish (deliveries n×, NPC hint, arrival-aware refinements).
 
-**Status: specification complete. Implementation not started — awaiting go-ahead.**
+**Status: S1 (P0 foundations) implemented — torus `dist()`, `tauH()` + `state.tauCache` learned from synced `travelSec`, puller v1.11.0 emits `travelSec`/`kind`/`ships`, synced ship routes book ships not phantom merchants. Next: S2 (flow core behind engine toggle).**

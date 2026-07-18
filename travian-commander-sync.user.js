@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Travian Commander - Pull & Sync bridge
 // @namespace    travian-commander
-// @version      1.10.0
+// @version      1.11.0
 // @description  One-click: a "Pull & Sync" button on the game retrieves every village's tribe, marketplace level, Trade Office level, barracks & stable levels, production, net crop, current resource storages (warehouse/granary stock + capacity), computed merchant capacity and active recurring trade routes, then pushes it straight into the Resource Commander tool (open in another tab) - no console, no file import. Read-only on the game.
 // @author       you
 // @match        *://*.travian.com/*
@@ -200,11 +200,18 @@
         if (!tr || !tr.from || !tr.to || !Array.isArray(tr.routes)) return;
         const sends = tr.routes.filter(r => r && r.enabled).sort((a, b) => (a.departureAt || 0) - (b.departureAt || 0));
         if (!sends.length) return;
-        // per-send resources = average across the day's sends (normally all identical), and merchants
-        const per = { lumber: 0, clay: 0, iron: 0, crop: 0 }; let merch = 0;
-        sends.forEach(r => { const cr = r.carriedResources || {}; keys.forEach(k => per[k] += cr[k] || 0); if ((r.merchants || 0) > merch) merch = r.merchants || 0; });
+        // per-send resources = average across the day's sends (normally all identical), and carriers
+        const per = { lumber: 0, clay: 0, iron: 0, crop: 0 }; let merch = 0, ships = 0, useShips = false;
+        sends.forEach(r => { const cr = r.carriedResources || {}; keys.forEach(k => per[k] += cr[k] || 0);
+          if ((r.merchants || 0) > merch) merch = r.merchants || 0;
+          if ((r.ships || 0) > ships) ships = r.ships || 0;
+          if (r.useTradeShips) useShips = true; });
         keys.forEach(k => per[k] = Math.round(per[k] / sends.length));
         if (!keys.some(k => per[k])) return;
+        // REAL one-way travel time (median arrivalAt - departureAt): exact even over water paths;
+        // the dashboard caches it per pair+kind and prefers it over distance/speed estimates
+        const travs = sends.map(r => Math.max(0, (r.arrivalAt || 0) - (r.departureAt || 0))).filter(s => s > 0).sort((a, b) => a - b);
+        const travelSec = travs.length ? travs[Math.floor(travs.length / 2)] : 0;
         // interval = median gap between consecutive departures (seconds -> whole hours); 1 send -> daily
         let intervalHours = 24;
         if (sends.length >= 2) {
@@ -214,7 +221,7 @@
         }
         // minute offset within each repeat cycle (staggering) - position of the first send in the interval
         const offsetHours = ((sends[0].departureAt || 0) % (intervalHours * 3600)) / 3600;
-        out.push({ fromDid: tr.from.id, toDid: tr.to.id, toName: tr.to.name, resources: per, intervalHours: intervalHours, offsetHours: offsetHours, merchants: merch });
+        out.push({ fromDid: tr.from.id, toDid: tr.to.id, toName: tr.to.name, resources: per, intervalHours: intervalHours, offsetHours: offsetHours, merchants: merch, ships: ships, kind: useShips ? 'ship' : 'merchant', travelSec: travelSec });
       });
       return out;
     }
