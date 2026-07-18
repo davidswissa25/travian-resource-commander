@@ -904,7 +904,7 @@ function renderOptimizer(){
       <label title="The hero's resource production is added to whatever village it currently sits in. Check this to plan without it (the hero can move, die, or be reassigned) - set each hero village's Hero production /h in its Edit form."><input type="checkbox" ${state.ignoreHeroProd?'checked':''} onchange="state.ignoreHeroProd=this.checked;save();renderAll()"> Ignore hero production</label>
       <span title="What the last game pull detected in your production numbers" style="font-size:11px;color:var(--faint);align-self:center">detected: <b style="color:${bs.active?'var(--accent)':'var(--faint)'}">${esc(bs.text)}</b></span>
       <label title="Extra % crop delivered to each troop village, scaling its whole crop draining — covers the growing upkeep of the troops being produced">Troop crop buffer %: <input type="number" min="0" value="${state.troopCropExtra==null?5:state.troopCropExtra}" style="width:50px" onchange="state.troopCropExtra=Math.max(0,+this.value||0);save();renderAll()"></label>
-      <label title="After covering every crop deficit, ship each village's leftover surplus crop to the Capital (fills its granary). The capital stops donating crop while this is on. Mark a Capital in a village's Edit form."><input type="checkbox" ${state.cropToCapital?'checked':''} onchange="state.cropToCapital=this.checked;save();renderAll()"> Send excess crop to capital</label>
+      <label title="Centralize crop: every village ships its whole crop surplus to the Capital, the Capital forwards it to your Crop hub, and the hub redistributes to draining villages (village -> capital -> hub -> deficits). Distribution rides the hub's trade ships, so lumber/clay/iron routing is untouched; only the collection legs share merchants. Needs a Capital marked (and a Crop hub for the middle leg). Crop is booked before L/C/I."><input type="checkbox" ${state.cropToCapital?'checked':''} onchange="state.cropToCapital=this.checked;save();renderAll()"> Centralize all crop (village &rarr; capital &rarr; hub)</label>
       <span class="note" style="margin:0" title="A Trainer artifact is detected from the Treasury on Pull & Sync and normalizes each village's training time. Per troop village you can override it (plan with/without the trainer) in that village's Edit form.">Trainer artifact: detected from Treasury &middot; per-village override in Edit</span>
       <label title="Plan a complete route set ignoring your existing routes (Save replaces the optimizer's previous routes). Uncheck to plan only the gap on top of what you already run."><input type="checkbox" ${optFromScratch?'checked':''} onchange="optFromScratch=this.checked;state.optFromScratch=optFromScratch;save();renderOptimizer()"> From scratch</label>
       <label>Server URL: <input type="text" value="${esc(state.serverUrl||'')}" placeholder="https://rof.x2.europe.travian.com" style="width:220px" onchange="state.serverUrl=this.value.trim().replace(/\/+$/,'');detectServerSpeed(state.serverUrl);renderAll()"></label>
@@ -1041,47 +1041,75 @@ function optimize(){
   // is only a TIEBREAK inside better() - it loses to a non-capital donor of equal delivery, but it is
   // no longer held back when tapping it covers more of the deficit. Hub rule still stands: when a hub
   // exists the capital feeds the hub (relay), not receivers directly, unless the receiver IS the hub.
-  receivers.forEach(R=>{
-    let need=R.need;
-    while(need>1){
-      let best=null;
-      const consider=c=>{ if(c && (c.F>=optMinRoute || c.F>=need-1) && (!best||better(c,best))) best=c; };
-      const scan=allowCapDirect=>{ donors.forEach(D=>{ if(D.avail<=0.5) return;
-        const capThruHub = anyHub && D.v.capital && !D.v.cropHub && !R.v.cropHub;
-        if(allowCapDirect || !capThruHub) consider(directCand(D,R,need));
-        hubs.forEach(H=>{ if(H.v.id!==D.v.id && H.v.id!==R.v.id && carr[H.v.id].merch+carr[H.v.id].ship>0) consider(relayCand(D,H,R,need)); });
-      }); };
-      scan(false);            // all villages compete; capital routes through a hub if one is marked
-      if(!best) scan(true);   // fallback: let the capital send direct only if no hub route could cover it
-      if(!best || best.F<1) break;                 // nothing can make progress
-      const covered=(need-best.F)<=1;
-      commitCand(best,covered);
-      const D=donors.find(d=>d.v.id===best.srcId); if(D) D.avail-=best.F;
-      need-=best.F;
-    }
-    if(need>1) unmet.push({name:R.v.name,need});
-  });
-  // Optional: after every deficit is covered, funnel each village's LEFTOVER surplus crop to the
-  // capital (pile it up there). Nearest donors first; bounded by the capital's free granary room and
-  // the donors' remaining spare carriers. The capital itself is not a donor while this is on.
-  const capD = data.find(d=>d.v.capital);
-  if(state.cropToCapital && capD){
-    let room = Math.max(0, capD.capRoom);
-    const collectors = donors.filter(d=>d.avail>0.5 && d.v.id!==capD.v.id).sort((a,b)=>dist(a.v,capD.v)-dist(b.v,capD.v));
-    for(const D of collectors){
-      if(room<optMinRoute) break;
-      const target=Math.min(D.avail, room);
-      if(target<optMinRoute) continue;
-      const dst=dist(D.v,capD.v);
-      const a=bestAlloc(wrap(D.v.id),dst,{v:capD.v,crop:capD.crop,need:1e-6,capRoom:room},target);
-      if(a.F<1) continue;
-      carr[D.v.id].merch=Math.max(0,carr[D.v.id].merch-a.mUsed);
-      carr[D.v.id].ship =Math.max(0,carr[D.v.id].ship -a.sUsed);
-      routes.push({from:D.v.id,to:capD.v.id,fromName:D.v.name,toName:capD.v.name,
+  const capV = data.find(d=>d.v.capital);
+  if(state.cropToCapital && capV){
+    // ===== Centralize-all-crop mode =====
+    // Every village funnels its whole crop surplus to the CAPITAL; the capital forwards it to the crop
+    // HUB (if a distinct one is marked); the hub redistributes to the draining villages - so all crop
+    // flows village -> capital -> hub -> deficits. Distribution rides the hub's own carriers (its trade
+    // ships), which lumber/clay/iron routing never uses, so those transfers are untouched by this leg;
+    // only the collection legs (inland villages -> capital) share merchants with L/C/I supply.
+    const hubNode = data.find(d=>d.v.cropHub && d.v.id!==capV.v.id) || null;
+    const distNode = hubNode || capV;                       // crop is pushed back out from here
+    const pushRoute=(src,dstV,a,dst,rel,imp)=>{ if(a.F<1) return false;
+      carr[src].merch=Math.max(0,carr[src].merch-a.mUsed); carr[src].ship=Math.max(0,carr[src].ship-a.sUsed);
+      routes.push({from:src,to:dstV.id,fromName:state.villages.find(x=>x.id===src).name,toName:dstV.name,
         cropPerHour:a.F,perSend:Math.round(a.F*a.I),interval:a.I,distance:Math.round(dst),
-        merchants:a.mUsed,ships:a.sUsed,roundTrip:a.roundTrip,merchCapped:a.capped,relay:null,impact:"excess &rarr; capital"});
-      D.avail-=a.F; room-=a.F*a.I;
+        merchants:a.mUsed,ships:a.sUsed,roundTrip:a.roundTrip,merchCapped:a.capped,relay:rel,impact:imp}); return true; };
+    // 1) COLLECTION: pull each surplus village's crop into the capital (nearest first). Skip the hub node
+    //    (it distributes, it doesn't ship its own crop away and back) - its surplus is counted at the hub.
+    let pool = Math.max(0, capV.net-keepReserve(capV.v).crop);   // capital's own surplus seeds the pool
+    const collectors = donors.filter(d=>d.avail>0.5 && d.v.id!==capV.v.id && (!hubNode||d.v.id!==hubNode.v.id))
+      .sort((a,b)=>dist(a.v,capV.v)-dist(b.v,capV.v));
+    for(const D of collectors){
+      const dst=dist(D.v,capV.v);
+      const a=bestAlloc(wrap(D.v.id),dst,{v:capV.v,crop:capV.crop,need:1e-6,capRoom:1e12},D.avail);
+      if(pushRoute(D.v.id,capV.v,a,dst,hubNode?"in":null,"&rarr; capital (collect)")){ pool+=a.F; D.avail-=a.F; }
     }
+    // Deficits to cover (skip capital & hub themselves - they are the central nodes, not receivers here)
+    const recvs=receivers.filter(r=>r.v.id!==capV.v.id && (!hubNode||r.v.id!==hubNode.v.id));
+    const totalDeficit=recvs.reduce((s,r)=>s+r.need,0);
+    // 2) CAPITAL -> HUB: forward only what distribution needs (capital keeps any leftover as its stockpile)
+    let atDist;
+    if(hubNode){
+      let hubHave=Math.max(0, hubNode.net-keepReserve(hubNode.v).crop);   // hub's own surplus
+      const forward=Math.min(pool, Math.max(0, totalDeficit-hubHave));
+      if(forward>0.5){ const dst=dist(capV.v,hubNode.v);
+        const a=bestAlloc(wrap(capV.v.id),dst,{v:hubNode.v,crop:hubNode.crop,need:1e-6,capRoom:1e12},forward);
+        if(pushRoute(capV.v.id,hubNode.v,a,dst,"out","capital &rarr; hub")) hubHave+=a.F; }
+      atDist=hubHave;
+    } else atDist=pool;
+    // 3) DISTRIBUTION: the hub (or capital) ships crop out to each draining village, most-urgent first,
+    //    on its own carriers (trade ships preferred, so L/C/I merchants are spared).
+    for(const R of recvs){
+      if(atDist<0.5){ unmet.push({name:R.v.name,need:R.need}); continue; }
+      const dst=dist(distNode.v,R.v);
+      const a=bestAlloc(wrap(distNode.v.id),dst,{v:R.v,crop:R.crop,need:R.need,capRoom:R.capRoom},Math.min(R.need,atDist));
+      if(pushRoute(distNode.v.id,R.v,a,dst,hubNode?"out":null,(R.need-a.F<=1?"deficit covered":"partial")+" (from "+(hubNode?"hub":"capital")+")")){
+        atDist-=a.F; if(R.need-a.F>1) unmet.push({name:R.v.name,need:R.need-a.F});
+      } else unmet.push({name:R.v.name,need:R.need});
+    }
+  } else {
+    receivers.forEach(R=>{
+      let need=R.need;
+      while(need>1){
+        let best=null;
+        const consider=c=>{ if(c && (c.F>=optMinRoute || c.F>=need-1) && (!best||better(c,best))) best=c; };
+        const scan=allowCapDirect=>{ donors.forEach(D=>{ if(D.avail<=0.5) return;
+          const capThruHub = anyHub && D.v.capital && !D.v.cropHub && !R.v.cropHub;
+          if(allowCapDirect || !capThruHub) consider(directCand(D,R,need));
+          hubs.forEach(H=>{ if(H.v.id!==D.v.id && H.v.id!==R.v.id && carr[H.v.id].merch+carr[H.v.id].ship>0) consider(relayCand(D,H,R,need)); });
+        }); };
+        scan(false);            // all villages compete; capital routes through a hub if one is marked
+        if(!best) scan(true);   // fallback: let the capital send direct only if no hub route could cover it
+        if(!best || best.F<1) break;                 // nothing can make progress
+        const covered=(need-best.F)<=1;
+        commitCand(best,covered);
+        const D=donors.find(d=>d.v.id===best.srcId); if(D) D.avail-=best.F;
+        need-=best.F;
+      }
+      if(need>1) unmet.push({name:R.v.name,need});
+    });
   }
   // Stagger send offsets per source so carriers aren't all out at once.
   const bySrc={}; routes.forEach(r=>{ (bySrc[r.from]=bySrc[r.from]||[]).push(r); });
