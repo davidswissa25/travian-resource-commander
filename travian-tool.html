@@ -2113,7 +2113,7 @@ function openVillage(id){
     <div class="sect">Celebrations (Town Hall) &mdash; reserves resources to run a celebration 24/7</div>
     <div class="field"><label>Town Hall level (auto-fetched on pull)</label><input type="number" id="f_th" min="0" max="20" value="${v.townHallLevel||''}" placeholder="0 = none" oninput="updateCelebNeeds()"></div>
     <div class="field full" id="celebNeedDisplay" style="font-size:12px;color:var(--dim);padding:4px 0"></div>
-    <div class="sect">Trade ships (harbor) &mdash; ${SHIP.capacity}/ship at ${SHIP.speed} fields/h (game constant; alliance bonus applies)</div>
+    <div class="sect">Trade ships (harbor) &mdash; using <b style="color:var(--accent)">${fmt(effShipCap(v))}</b>/ship ${v.shipCapacityReal>0?'<span style="color:var(--ok)">(captured from game &mdash; includes harbor/Trade&nbsp;Office)</span>':`<span style="color:var(--warn)">(fallback ${SHIP.capacity}&times;speed&times;bonus &mdash; no harbor value captured on pull)</span>`} at ${fmt(effShipSpeed())} fields/h</div>
     ${num("Trade ships","f_ships",v.tradeShips,"0 = no harbor")}<div class="field"></div>
     <div class="sect">Troops (count &times; upkeep auto-sums into crop consumption)</div>
     <div class="field full" id="troopBox"></div>
