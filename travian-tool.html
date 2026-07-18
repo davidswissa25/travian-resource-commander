@@ -808,6 +808,28 @@ function buildAutoPlan(mode){
   routes=routes.filter(r=>RES.some(k=>r.resources[k]>=1));
   const bySrc={}; routes.forEach(r=>(bySrc[r.from]=bySrc[r.from]||[]).push(r));
   Object.values(bySrc).forEach(list=>list.forEach((r,i)=>r.offsetHours=+((r.interval*i/Math.max(1,list.length)).toFixed(3))));
+  // ---- Carrier-limited villages: still holding movable surplus but out of free merchants/ships ----
+  // (i.e. NOT all of the village's resources are being used - you'd move more if you had more carriers).
+  // Requires free carriers == 0 so it isn't confused with "surplus left because nothing needs it".
+  const committedC=planCommitted();
+  const carrierLimited=[];
+  state.villages.forEach(v=>{
+    const maxC=maxMerchants(v)+maxShips(v); if(maxC<=0) return;   // no carriers configured: handled elsewhere
+    const c=committedC[v.id]||{merchants:0,ships:0};
+    let usedM=0,usedS=0, shipped={lumber:0,clay:0,iron:0,crop:0};
+    routes.forEach(r=>{ if(r.from===v.id){ usedM+=r.merchants||0; usedS+=r.ships||0; RES.forEach(k=>shipped[k]+=r.flow[k]||0); } });
+    const freeC=Math.max(0,maxMerchants(v)-c.merchants-usedM)+Math.max(0,maxShips(v)-c.ships-usedS);
+    if(freeC>0) return;                                            // still has spare carriers -> not carrier-limited
+    const need=hasSupplyNeed(v)?troopNeedsPerHour(v):{}, res=keepReserve(v), left={};
+    RES.forEach(k=>{
+      let s = k==='crop'
+        ? ((v.troopVillage||(v.capital&&state.cropToCapital)) ? 0 : prodBase(v,'crop')-consumption(v)-(res.crop||0))
+        : prodBase(v,k)-(res[k]||0)-(need[k]||0);
+      left[k]=Math.max(0, s-(shipped[k]||0));                      // own movable surplus the plan couldn't ship
+    });
+    const total=RES.reduce((a,k)=>a+left[k],0);
+    if(total>=Math.max(1,optMinRoute)) carrierLimited.push({id:v.id,name:v.name,res:left,total:Math.round(total)});
+  });
   // summary
   const moved={lumber:0,clay:0,iron:0,crop:0}; routes.forEach(r=>RES.forEach(k=>moved[k]+=r.flow[k]));
   const parts=[]; if(moved.crop>=1) parts.push(fmt(moved.crop)+" crop"); ["lumber","clay","iron"].forEach(k=>{ if(moved[k]>=1) parts.push(fmt(moved[k])+" "+k); });
@@ -818,7 +840,9 @@ function buildAutoPlan(mode){
     ? `<p class="note">&#9888; Crop still uncovered: ${cropPlan.unmet.map(u=>esc(u.name)+" ("+fmt(u.need)+"/h short)").join(", ")}.</p>` : "";
   if(overflowPlan.urgent && overflowPlan.urgent.length)
     unmetNote += `<p class="note">&#9888; Warehouse still filling within ${WAREHOUSE_FILL_H}h (out of carriers or troop-village room): ${overflowPlan.urgent.join(", ")}. Raise Marketplace levels/trade ships or add another troop village.</p>`;
-  return {routes, summary, unmetNote, cropPlan};
+  if(carrierLimited.length)
+    unmetNote += `<p class="note">&#9650; Carrier-limited &mdash; these villages still hold surplus they <b>can&rsquo;t move</b> (no free merchants/ships left, so not all their resources are used): ${carrierLimited.map(c=>`<b>${esc(c.name)}</b> (${RES.filter(k=>c.res[k]>=1).map(k=>`<span style="color:var(--${k})">${fmt(c.res[k])} ${k}</span>`).join(' &middot; ')}/h)`).join("; ")}. Raise their Marketplace level or add trade ships to move it.</p>`;
+  return {routes, summary, unmetNote, cropPlan, carrierLimited};
 }
 function renderUnified(plan){
   const vName=id=>{const v=state.villages.find(x=>x.id===id);return v?v.name:'?';};
@@ -857,7 +881,9 @@ function renderUnified(plan){
     const list=bySrc[src];
     const out=(io[src]&&io[src].out)||{lumber:0,clay:0,iron:0,crop:0};
     const outStr=RES.filter(k=>out[k]>=1).map(k=>`<span style="color:var(--${k})">${fmt(out[k])}</span>`).join(' <span style="color:var(--faint)">&middot;</span> ');
-    html+=`<tr><td colspan="9" style="background:var(--panel2);font-weight:650">&#128666; ${esc(vName(src))} &mdash; ${list.length} route${list.length>1?'s':''} <span style="font-weight:400;font-size:11px;color:var(--dim);margin-left:8px">out /h: ${outStr||'&mdash;'}</span></td></tr>`;
+    const cl=(plan.carrierLimited||[]).find(c=>c.id===src);
+    const clBadge=cl?` <span style="color:var(--warn)" title="Carrier-limited: still holds ${RES.filter(k=>cl.res[k]>=1).map(k=>fmt(cl.res[k])+' '+k).join(', ')}/h it can't move - out of free merchants/ships">&#9650; can't move all (${fmt(cl.total)}/h left)</span>`:'';
+    html+=`<tr><td colspan="9" style="background:var(--panel2);font-weight:650">&#128666; ${esc(vName(src))} &mdash; ${list.length} route${list.length>1?'s':''} <span style="font-weight:400;font-size:11px;color:var(--dim);margin-left:8px">out /h: ${outStr||'&mdash;'}</span>${clBadge}</td></tr>`;
     list.forEach(r=>{
       const carriers=`${r.merchants}&#128722;`+(r.ships?` + ${r.ships}&#9973;`:'');
       const fromV=state.villages.find(v=>v.id===r.from), toV=state.villages.find(v=>v.id===r.to);
