@@ -392,6 +392,7 @@ function normalizeProfile(p, label){
   if(p.ignoreHeroProd==null) p.ignoreHeroProd=false; // plan without the hero's resource production (the hero can move/die/be reassigned)
   if(p.troopCropExtra==null) p.troopCropExtra=5; // % extra crop on troop-training cost (newly-made troops add upkeep)
   if(!p.tauCache) p.tauCache={}; // learned one-way travel times per "fromDid>toDid>kind" ({sec,src,at}), from synced routes
+  if(!p.optEngine) p.optEngine='v1'; // Auto-Routes engine: 'v1' legacy greedy | 'v2' tiered min-cost flow (OPTIMIZER-DESIGN.md)
   ensureIds(p.villages); // backfill missing/duplicate ids so edit & delete always match
   dedupeAndSort(p);      // remove rename-duplicates (same coords) and order by village number
   return p;
@@ -767,7 +768,291 @@ function vcard(v,flows){
 // merge every proposed shipment sharing the same From->To into a single trade route carrying all
 // four resources, then guard against overfilling any granary/warehouse over time.
 const OVERFILL_HORIZON = 48; // h: allow filling a warehouse no faster than this
+/* ===== Optimizer v2 (S2): tiered min-cost-flow engine — see OPTIMIZER-DESIGN.md =====
+   Pipeline: model -> tier demands (T0 starvation, T1 requirements, T3 overflow, T4 sweep) ->
+   per-demand min-cost flow on a split-node graph (S -> out(u) -> in(w) -> T; hubs/capital may
+   transship crop) -> materialize periodic routes (interval, integer carriers, min-route) with a
+   re-injection pass so dropped/capped flow is re-routed instead of silently lost.
+   v1 stays the default engine; the 48h simulator (S3) will validate these plans. */
+const V2={SCALE:1e6, RESV_PEN:1.5, CAP_PEN:1.1, HUB_EPS:1, ROOM_SAFETY:0.9, PASSES:2};
+function buildModelV2(){
+  const flows=planFlows(), committed=planCommitted();
+  const vils=state.villages.map(v=>{
+    const c=committed[v.id]||{merchants:0,ships:0}, p=projected(v,flows);
+    return {id:v.id, v, name:v.name,
+      prod:{lumber:prodBase(v,'lumber'),clay:prodBase(v,'clay'),iron:prodBase(v,'iron'),crop:prodBase(v,'crop')},
+      upkeep:consumption(v),
+      inn:flows.inn[v.id]||{lumber:0,clay:0,iron:0,crop:0},
+      out:flows.out[v.id]||{lumber:0,clay:0,iron:0,crop:0},
+      stock:p.cur, cap:p.cap,
+      needs:troopNeedsPerHour(v), reserve:keepReserve(v),
+      fleet:{merchant:{cap:effCap(v)}, ship:{cap:effShipCap(v)}},
+      free:{merchant:Math.max(0,maxMerchants(v)-c.merchants), ship:Math.max(0,maxShips(v)-c.ships)},
+      flags:{capital:!!v.capital, hub:!!v.cropHub, troop:!!v.troopVillage, target:hasSupplyNeed(v)},
+      prio:v.troopPriority||1};
+  });
+  return {vils, byId:Object.fromEntries(vils.map(m=>[m.id,m])), assign:[], pen:new Set()};
+}
+function v2Net(m,k){ return m.prod[k]-(k==='crop'?m.upkeep:0)+(m.inn[k]||0)-(m.out[k]||0); }
+// Export bands per village per resource: free surplus vs the celebration/build reserve. The own
+// L/C/I requirement is kept home first (a met supply target still exports its genuine spare).
+// Starvation/requirement tiers may tap the reserve band at a cost penalty; overflow/sweep may not.
+function v2Bands(M){
+  M.vils.forEach(m=>{ m.sur={free:{},resv:{}};
+    RES.forEach(k=>{
+      if(k==='crop'&&m.flags.troop){ m.sur.free[k]=0; m.sur.resv[k]=0; return; } // crop never leaves a troop village
+      let net=v2Net(m,k); if(k!=='crop') net-=m.needs[k]||0;
+      const rv=Math.min(Math.max(0,net), m.reserve[k]||0);
+      m.sur.resv[k]=rv; m.sur.free[k]=Math.max(0,net-rv);
+    });
+  });
+}
+function v2Demands(M,mode){
+  const buf=1+((state.troopCropExtra==null?5:state.troopCropExtra)/100);
+  const t0=[], t1=[], t3=[], t4=[];
+  M.vils.forEach(m=>{ const nc=v2Net(m,'crop');
+    if(nc<-0.5) t0.push({vid:m.id,k:'crop',rate:-nc*(m.flags.troop?buf:1),urg:(m.stock.crop||0)/(-nc),tier:'t0'}); });
+  t0.sort((a,b)=>(a.urg-b.urg)||(a.vid<b.vid?-1:1)); // most urgent granary first
+  M.vils.filter(m=>m.flags.target).sort((a,b)=>(a.prio-b.prio)||(a.id<b.id?-1:1)).forEach(m=>{
+    ['lumber','clay','iron'].forEach(k=>{ const gap=(m.needs[k]||0)-Math.max(0,v2Net(m,k));
+      if(gap>0.5) t1.push({vid:m.id,k,rate:gap,tier:'t1'}); });
+  });
+  if(mode==='all'){ // overflow relief: supply targets absorb surplus into warehouse room (they burn it)
+    M.vils.filter(m=>m.flags.target).forEach(m=>{
+      ['lumber','clay','iron'].forEach(k=>{ const room=Math.max(0,(m.cap[k]||0)-(m.stock[k]||0));
+        if(room>1) t3.push({vid:m.id,k,rate:room/WAREHOUSE_FILL_H,tier:'t3'}); });
+    });
+  }
+  if(state.cropToCapital){ const cap=M.vils.find(m=>m.flags.capital);
+    if(cap){ const room=Math.max(0,(cap.cap.crop||0)-(cap.stock.crop||0));
+      if(room>1) t4.push({vid:cap.id,k:'crop',rate:room/OVERFILL_HORIZON,tier:'t4'}); } }
+  return {t0,t1,t3,t4};
+}
+// Which villages may relay crop through themselves (flow in -> flow out).
+function v2Transship(M,m,anyHub){
+  if(state.cropToCapital && M.vils.some(x=>x.flags.capital)) return m.flags.capital||m.flags.hub;
+  return anyHub ? m.flags.hub : !m.flags.troop;
+}
+// Mode topology: which (u -> w) legs exist for this resource/tier.
+function v2AllowPair(M,u,w,k,tier,opts){
+  if(k!=='crop') return true;                       // l/c/i: free graph (and no transshipment)
+  if(u.flags.troop) return false;
+  if(tier==='t4') return !!w.flags.capital;         // sweep goes straight to the capital
+  const capM=M.vils.find(m=>m.flags.capital);
+  if(state.cropToCapital && capM){                  // centralize: village -> capital -> hub -> receivers
+    const hubM=M.vils.find(m=>m.flags.hub&&!m.flags.capital);
+    if(hubM){ if(u.flags.capital) return w.id===hubM.id; if(u.id===hubM.id) return true; return w.id===capM.id; }
+    return u.flags.capital ? true : w.id===capM.id; // no distinct hub: capital distributes itself
+  }
+  const anyHub=M.vils.some(m=>m.flags.hub);
+  if(!opts.allowCapDirect && anyHub && u.flags.capital && !u.flags.hub && !w.flags.hub) return false; // capital feeds the hub
+  return true;
+}
+// Reference cost for the reserve-band penalty: the cheapest way anything leaves this village.
+function v2MinArcCost(M,m,ledger){
+  let best=Infinity;
+  ['merchant','ship'].forEach(kind=>{ if((ledger[m.id][kind]||0)<=0) return; const cp=m.fleet[kind].cap; if(cp<=0) return;
+    M.vils.forEach(w=>{ if(w.id===m.id) return; const c=V2.SCALE*(2*tauH(m.v,w.v,kind))/cp; if(c<best) best=c; }); });
+  return best===Infinity ? V2.SCALE*0.01 : best;
+}
+// Successive-shortest-path min-cost flow (Dijkstra + node potentials; all costs >= 0).
+function v2MCF(N,arcs,S,T){
+  const adj=Array.from({length:N},()=>[]);
+  arcs.forEach((a,i)=>{ adj[a.u].push({to:a.v,i,f:1}); adj[a.v].push({to:a.u,i,f:0}); });
+  const pot=new Array(N).fill(0); let moved=0;
+  for(let guard=0; guard<300; guard++){
+    const dst=new Array(N).fill(Infinity), pe=new Array(N).fill(null), done=new Array(N).fill(false);
+    dst[S]=0;
+    for(;;){ let u=-1,b=Infinity; for(let x=0;x<N;x++) if(!done[x]&&dst[x]<b){b=dst[x];u=x;} if(u<0) break; done[u]=true;
+      for(const e of adj[u]){ const a=arcs[e.i], res=e.f? a.cap-a.flow : a.flow; if(res<=0.5) continue;
+        const rc=(e.f? a.cost : -a.cost)+pot[u]-pot[e.to];
+        if(dst[u]+rc < dst[e.to]-1e-9){ dst[e.to]=dst[u]+rc; pe[e.to]={i:e.i,f:e.f,from:u}; } } }
+    if(dst[T]===Infinity) break;
+    for(let x=0;x<N;x++) if(dst[x]<Infinity) pot[x]+=dst[x];
+    let bn=Infinity;
+    for(let x=T;x!==S;){ const p=pe[x], a=arcs[p.i]; bn=Math.min(bn, p.f? a.cap-a.flow : a.flow); x=p.from; }
+    if(!(bn>0.5)) break;
+    for(let x=T;x!==S;){ const p=pe[x], a=arcs[p.i]; a.flow+=p.f? bn : -bn; x=p.from; }
+    moved+=bn;
+  }
+  return moved;
+}
+// Solve ONE demand: build the split-node graph, run MCF, record per-leg assignments, decrement
+// surplus bands and (fractionally) the carrier ledger so later demands see what's left.
+function v2Solve(M,dem,ledger,opts){
+  const n=M.vils.length, N=2+2*n, S=0, T=1, out=i=>2+2*i, inn=i=>3+2*i;
+  const arcs=[];
+  const add=(u,v,cap,cost,meta)=>{ if(cap<=0.5) return; arcs.push({u,v,cap,cost:Math.max(0,Math.round(cost)),flow:0,meta}); };
+  const anyHub=M.vils.some(m=>m.flags.hub);
+  M.vils.forEach((m,i)=>{
+    if(m.id!==dem.vid){ // the receiver's own production is already netted into the demand
+      add(S,out(i),m.sur.free[dem.k]||0,0,{band:'free',vid:m.id});
+      if(dem.tier==='t0'||dem.tier==='t1')
+        add(S,out(i),m.sur.resv[dem.k]||0,v2MinArcCost(M,m,ledger)*(V2.RESV_PEN-1)+1,{band:'resv',vid:m.id});
+    }
+    if(dem.k==='crop' && v2Transship(M,m,anyHub)) add(inn(i),out(i),1e12,V2.HUB_EPS,null);
+  });
+  M.vils.forEach((u,i)=>M.vils.forEach((w,j)=>{
+    if(i===j || !v2AllowPair(M,u,w,dem.k,dem.tier,opts)) return;
+    ['merchant','ship'].forEach(kind=>{
+      const free=ledger[u.id][kind]; if(free<=0) return;
+      const cp=u.fleet[kind].cap; if(cp<=0) return;
+      const t=tauH(u.v,w.v,kind);
+      let cost=V2.SCALE*(2*t)/cp;
+      if(u.flags.capital) cost*=V2.CAP_PEN;
+      if(M.pen.has(u.id+'>'+w.id+'>'+kind)) cost*=2;
+      add(out(i),inn(j),free*cp/(2*t),cost,{leg:[u.id,w.id,kind],t});
+    });
+  }));
+  const di=M.vils.findIndex(m=>m.id===dem.vid);
+  add(inn(di),T,dem.rate,0,null);
+  const moved=v2MCF(N,arcs,S,T);
+  if(moved>0.5) arcs.forEach(a=>{ if(a.flow>0.5&&a.meta){
+    if(a.meta.band){ const m=M.byId[a.meta.vid]; const b=a.meta.band==='free'?'free':'resv';
+      m.sur[b][dem.k]=Math.max(0,(m.sur[b][dem.k]||0)-a.flow); }
+    if(a.meta.leg){ M.assign.push({u:a.meta.leg[0],w:a.meta.leg[1],kind:a.meta.leg[2],k:dem.k,rate:a.flow,tier:dem.tier});
+      ledger[a.meta.leg[0]][a.meta.leg[2]]=Math.max(0,ledger[a.meta.leg[0]][a.meta.leg[2]]-a.flow*(2*a.meta.t)/M.byId[a.meta.leg[0]].fleet[a.meta.leg[2]].cap); }
+  }});
+  return moved;
+}
+// Turn accumulated leg assignments into legal periodic routes: one (pair, kind) route carrying
+// all its resources, interval snapped to the game's allowed set, integer carriers with waves.
+// Carriers are allocated by TIER CLASS - class A (t0 starvation + t1 requirements) books first,
+// class B (t3 overflow + t4 sweep) only gets leftover carriers, piggybacking on A's routes where
+// the batch still fits - so the sweep can never steal carriers from starving/required flows.
+function v2Materialize(M){
+  const comp={};
+  M.assign.forEach(a=>{ if(a.rate<=0.25) return; const key=a.u+'>'+a.w+'>'+a.kind, cls=(a.tier==='t0'||a.tier==='t1')?'A':'B';
+    const c=comp[key]||(comp[key]={u:a.u,w:a.w,kind:a.kind});
+    const s=c[cls]||(c[cls]={flow:{lumber:0,clay:0,iron:0,crop:0},flowT:{},tags:new Set()});
+    s.flow[a.k]+=a.rate; s.tags.add(a.tier);
+    (s.flowT[a.tier]=s.flowT[a.tier]||{lumber:0,clay:0,iron:0,crop:0})[a.k]+=a.rate; });
+  const ledger={}; M.vils.forEach(m=>ledger[m.id]={merchant:m.free.merchant, ship:m.free.ship});
+  const byKey={}, shortfalls=[];
+  const chooseI=(W,flow,t)=>{
+    // near round-trip for carrier efficiency, but one batch must fit, and a draining crop
+    // receiver must get the next batch before its granary empties
+    let lim=Math.max(1,Math.min(24, Math.max(1,2*t)));
+    const wf=flow.lumber+flow.clay+flow.iron;
+    if(wf>1){ const room=Math.max(0,(W.cap.lumber||0)-Math.max(W.stock.lumber||0,W.stock.clay||0,W.stock.iron||0));
+      lim=Math.min(lim, Math.max(1, room*V2.ROOM_SAFETY/wf)); }
+    if(flow.crop>1){ const room=Math.max(0,(W.cap.crop||0)-(W.stock.crop||0));
+      lim=Math.min(lim, Math.max(1, room*V2.ROOM_SAFETY/flow.crop));
+      const nc=v2Net(W,'crop'); if(nc<-0.5) lim=Math.min(lim, Math.max(1,(W.stock.crop||0)/(-nc))); }
+    return snapIntervalFloor(lim);
+  };
+  const alloc=(key,c,cls)=>{
+    const part=c[cls]; if(!part) return;
+    const U=M.byId[c.u], W=M.byId[c.w];
+    const addTot=RES.reduce((s,k)=>s+part.flow[k],0); if(addTot<0.5) return;
+    let R=byKey[key];
+    const grand=addTot+(R?RES.reduce((s,k)=>s+R.flow[k],0):0);
+    if(grand<Math.max(1,optMinRoute)){ shortfalls.push({c,part,cls,all:true,reason:'below min route'}); return; }
+    const t=tauH(U.v,W.v,c.kind), cp=U.fleet[c.kind].cap;
+    const I=R?R.interval:chooseI(W,part.flow,t);
+    const waves=Math.max(1,Math.ceil((2*t)/I));
+    const curSets=R?R.sets:0;
+    let sets=Math.max(1,Math.ceil(Math.round(grand*I)/cp));
+    let extra=(sets-curSets)*waves, capped=false, keep=1;
+    if(extra>ledger[c.u][c.kind]){
+      const setsMax=curSets+Math.floor(ledger[c.u][c.kind]/waves);
+      if(setsMax<1){ shortfalls.push({c,part,cls,all:true,reason:'no free carriers'}); return; }
+      sets=Math.max(curSets,setsMax); capped=true;
+      const allow=sets*cp, exist=R?RES.reduce((s,k)=>s+R.flow[k],0)*I:0;
+      keep=Math.max(0,Math.min(1,(allow-exist)/(addTot*I)));
+      if(keep<=0){ shortfalls.push({c,part,cls,all:true,reason:'no free carriers'}); return; }
+      if(keep<1) shortfalls.push({c,part,cls,all:false,lost:1-keep,reason:'carrier-capped'});
+      extra=(sets-curSets)*waves;
+    }
+    ledger[c.u][c.kind]-=Math.max(0,extra);
+    if(!R) R=byKey[key]={from:c.u,to:c.w,fromName:U.name,toName:W.name,kind:c.kind,
+      flow:{lumber:0,clay:0,iron:0,crop:0},flowT:{},tags:new Set(),interval:I,sets:0,waves,capped:false};
+    R.sets=sets; R.capped=R.capped||capped;
+    RES.forEach(k=>{ R.flow[k]+=part.flow[k]*keep; });
+    Object.keys(part.flowT).forEach(tier=>{ const ft=R.flowT[tier]=R.flowT[tier]||{lumber:0,clay:0,iron:0,crop:0};
+      RES.forEach(k=>ft[k]+=part.flowT[tier][k]*keep); });
+    part.tags.forEach(x=>R.tags.add(x));
+  };
+  Object.keys(comp).sort().forEach(k=>alloc(k,comp[k],'A'));
+  Object.keys(comp).sort().forEach(k=>alloc(k,comp[k],'B'));
+  const routes=Object.values(byKey).map(R=>({from:R.from,to:R.to,fromName:R.fromName,toName:R.toName,
+    flow:R.flow, interval:R.interval, merchants:R.kind==='merchant'?R.sets*R.waves:0, ships:R.kind==='ship'?R.sets*R.waves:0,
+    distance:Math.round(dist(M.byId[R.from].v,M.byId[R.to].v)), tags:[...R.tags].sort(), relay:null, merchCapped:R.capped, flowT:R.flowT}))
+    .filter(r=>RES.reduce((s,k)=>s+r.flow[k],0)>=1);
+  return {routes,shortfalls,ledger};
+}
+// Dropped/capped flow: give donors their surplus back, penalize the failed pair, and emit the
+// lost amounts as fresh demands so the next pass re-routes them through other arcs.
+function v2Reinject(M,shortfalls){
+  const dems=[], clsTiers={A:{t0:1,t1:1},B:{t3:1,t4:1}};
+  shortfalls.forEach(s=>{
+    const lost=s.all?1:s.lost; if(lost<=0) return;
+    M.pen.add(s.c.u+'>'+s.c.w+'>'+s.c.kind);
+    Object.keys(s.part.flowT).sort().forEach(tier=>RES.forEach(k=>{ const amt=(s.part.flowT[tier][k]||0)*lost;
+      if(amt>0.5){ dems.push({vid:s.c.w,k,rate:amt,tier}); M.byId[s.c.u].sur.free[k]=(M.byId[s.c.u].sur.free[k]||0)+amt; } }));
+    const inCls=t=>!!clsTiers[s.cls][t];
+    if(s.all) M.assign=M.assign.filter(a=>!(a.u===s.c.u&&a.w===s.c.w&&a.kind===s.c.kind&&inCls(a.tier)));
+    else M.assign.forEach(a=>{ if(a.u===s.c.u&&a.w===s.c.w&&a.kind===s.c.kind&&inCls(a.tier)) a.rate*=(1-lost); });
+  });
+  const ord={t0:0,t1:1,t3:2,t4:3};
+  return dems.sort((a,b)=>(ord[a.tier]-ord[b.tier])||(a.vid<b.vid?-1:1));
+}
+function buildAutoPlanV2(mode){
+  const tStart=performance.now();
+  const M=buildModelV2(); v2Bands(M);
+  const dems=v2Demands(M,mode);
+  const tiers=(mode==='all')?['t0','t1','t3','t4']:['t0','t4'];
+  const ledger={}; M.vils.forEach(m=>ledger[m.id]={merchant:m.free.merchant, ship:m.free.ship});
+  const hardUnmet=[];
+  const run=(list,led)=>list.forEach(d=>{ if(d.rate<=0.5) return;
+    let got=v2Solve(M,d,led,{allowCapDirect:false});
+    if(d.rate-got>0.5 && d.k==='crop') got+=v2Solve(M,{...d,rate:d.rate-got},led,{allowCapDirect:true});
+    if(d.tier!=='t3'&&d.tier!=='t4'&&d.rate-got>0.5) hardUnmet.push({vid:d.vid,k:d.k,rate:d.rate-got,reason:'no donor surplus/path'});
+  });
+  tiers.forEach(t=>run(dems[t],ledger));
+  let mat=v2Materialize(M);
+  for(let p=2; p<=V2.PASSES && mat.shortfalls.length; p++){
+    const extra=v2Reinject(M,mat.shortfalls);
+    const led2={}; M.vils.forEach(m=>led2[m.id]={...mat.ledger[m.id]});
+    extra.forEach(d=>{ if(d.rate<=0.5) return;
+      const got=v2Solve(M,d,led2,{allowCapDirect:true});
+      if(d.tier!=='t3'&&d.tier!=='t4'&&d.rate-got>0.5) hardUnmet.push({vid:d.vid,k:d.k,rate:d.rate-got,reason:'carrier-limited'});
+    });
+    mat=v2Materialize(M);
+  }
+  const routes=mat.routes;
+  // offsets: stagger per source (arrival-aware staggering lands in S5)
+  const bySrc={}; routes.forEach(r=>(bySrc[r.from]=bySrc[r.from]||[]).push(r));
+  Object.values(bySrc).forEach(list=>list.forEach((r,i)=>r.offsetHours=+((r.interval*i/Math.max(1,list.length)).toFixed(3))));
+  // relay badges on crop chains through the capital/hub
+  const hubish=new Set(M.vils.filter(m=>m.flags.hub||m.flags.capital).map(m=>m.id));
+  routes.forEach(r=>{ if(r.flow.crop>1){
+    if(hubish.has(r.to)&&routes.some(x=>x.from===r.to&&x.flow.crop>1)) r.relay='in';
+    else if(hubish.has(r.from)&&routes.some(x=>x.to===r.from&&x.flow.crop>1)) r.relay='out'; } });
+  routes.forEach(r=>{ r.resources={}; RES.forEach(k=>r.resources[k]=Math.round(r.flow[k]*r.interval)); });
+  const kept=routes.filter(r=>RES.some(k=>r.resources[k]>=1));
+  // carrier-limited: every carrier booked AND exportable surplus stuck at home
+  const carrierLimited=[];
+  M.vils.forEach(m=>{ if((m.free.merchant+m.free.ship)<=0) return;
+    const l=mat.ledger[m.id]; if((l.merchant+l.ship)>0) return;
+    const left={}; let tot=0; RES.forEach(k=>{ left[k]=Math.max(0,m.sur.free[k]||0); tot+=left[k]; });
+    if(tot>=Math.max(1,optMinRoute)) carrierLimited.push({id:m.id,name:m.name,res:left,total:Math.round(tot)}); });
+  const moved={lumber:0,clay:0,iron:0,crop:0}; kept.forEach(r=>RES.forEach(k=>moved[k]+=r.flow[k]));
+  const parts=[]; if(moved.crop>=1) parts.push(fmt(moved.crop)+' crop'); ['lumber','clay','iron'].forEach(k=>{ if(moved[k]>=1) parts.push(fmt(moved[k])+' '+k); });
+  const ms=Math.round(performance.now()-tStart);
+  const summary = kept.length
+    ? `<b>[v2]</b> ${kept.length} route${kept.length>1?'s':''} across ${Object.keys(bySrc).length} village(s), moving ${parts.join(' + ')||'&mdash;'} per hour <span style="color:var(--faint)">(tiered min-cost flow, ${ms}ms &middot; 48h simulator lands in S3)</span>`
+    : `<b>[v2]</b> nothing to route &mdash; no tier demands that a donor can reach.`;
+  let unmetNote='';
+  if(hardUnmet.length){ const byV={};
+    hardUnmet.forEach(u2=>{ const m=M.byId[u2.vid]; (byV[m.name]=byV[m.name]||[]).push(fmt(u2.rate)+' '+u2.k+'/h ('+u2.reason+')'); });
+    unmetNote=`<p class="note">&#9888; <b>[v2]</b> unmet: ${Object.keys(byV).sort().map(n=>`<b>${esc(n)}</b>: ${byV[n].join(', ')}`).join('; ')}.</p>`; }
+  if(carrierLimited.length)
+    unmetNote+=`<p class="note">&#9650; Carrier-limited &mdash; surplus stuck at home (no free merchants/ships): ${carrierLimited.map(c=>`<b>${esc(c.name)}</b> (${RES.filter(k=>c.res[k]>=1).map(k=>`<span style="color:var(--${k})">${fmt(c.res[k])} ${k}</span>`).join(' &middot; ')}/h)`).join('; ')}.</p>`;
+  return {routes:kept, summary, unmetNote, cropPlan:null, carrierLimited};
+}
 function buildAutoPlan(mode){
+  if((state.optEngine||'v1')==='v2') return buildAutoPlanV2(mode);
   const cropPlan=optimize();
   const all = mode==='all';
   const troopPlan = all ? optimizeTroopSupply(cropPlan) : {routes:[]};
@@ -947,6 +1232,11 @@ function renderOptimizer(){
         <select onchange="optMode=this.value;state.optMode=optMode;save();renderOptimizer()">
           <option value="crop" ${optMode==='crop'?'selected':''}>Crop only (anti-starvation)</option>
           <option value="all" ${optMode==='all'?'selected':''}>All-in-one (crop + troops + celebrations + overflow)</option>
+        </select></label>
+      <label title="v1 = current greedy planner. v2 (beta) = tiered min-cost-flow engine (OPTIMIZER-DESIGN.md): starvation -> requirements -> overflow -> stockpile, learned travel times, re-injection instead of dropping flow. The 48h simulator that validates v2 plans lands in stage S3.">Engine:
+        <select onchange="state.optEngine=this.value;save();renderOptimizer()">
+          <option value="v1" ${(state.optEngine||'v1')==='v1'?'selected':''}>v1</option>
+          <option value="v2" ${state.optEngine==='v2'?'selected':''}>v2 (beta)</option>
         </select></label>
       <label title="Per hour of each resource to keep in a Still-building village before it donates (0 elsewhere)">Build buffer /h: <input type="number" value="${optMargin}" style="width:64px" onchange="optMargin=+this.value||0;state.optMargin=optMargin;save();renderOptimizer()"></label>
       <label title="Smallest route worth creating - routes below this hourly flow are dropped">Min route /h: <input type="number" value="${optMinRoute}" style="width:64px" onchange="optMinRoute=+this.value||0;state.optMinRoute=optMinRoute;save();renderOptimizer()"></label>

@@ -6,7 +6,7 @@
 - [x] Research + Part I design (problem model, algorithm, modes)
 - [x] Part II pre-implementation spec (P0–P9)
 - [x] **S1 — Foundations**: torus `dist()`, `tauH()` + `tauCache` learned travel times, puller v1.11.0 (`travelSec`/`kind`/`ships`), ship-route carrier ledger — commit `178912f`
-- [ ] **S2 — Flow core**: Model build, tiers T0–T4, SSP min-cost flow, materialization, `v1 | v2` engine toggle
+- [x] **S2 — Flow core**: Model build, tiers T0–T4, SSP min-cost flow, tier-class materialization + re-injection, `v1 | v2` engine toggle (v1 default)
 - [ ] **S3 — Simulator**: 48h discrete-event sim + repair loop, A/B against v1
 - [ ] **S4 — Modes & diff-apply**: hub/centralize/auto arc policies, minimal changeset apply, v2 default
 - [ ] **S5 — Polish**: deliveries n×, arrival-aware staggering, NPC hint, dead-code removal
@@ -357,4 +357,4 @@ routes all surface as concrete failed checks *before* the user sees the plan.
 ## P9. Implementation stages (unchanged from §7, now mapped to spec sections)
 S1 = P0 (torus + τ + puller) · S2 = P1–P3 behind toggle · S3 = P4 + A/B · S4 = P5 modes/diff, default v2 · S5 = polish (deliveries n×, NPC hint, arrival-aware refinements).
 
-**Status: S1 (P0 foundations) implemented — torus `dist()`, `tauH()` + `state.tauCache` learned from synced `travelSec`, puller v1.11.0 emits `travelSec`/`kind`/`ships`, synced ship routes book ships not phantom merchants. Next: S2 (flow core behind engine toggle).**
+**Status: S2 implemented — `buildAutoPlanV2` pipeline (model → bands → tier demands → per-demand SSP min-cost flow on split-node graph → tier-class materialization with re-injection) behind the Engine `v1 | v2` toggle; v1 remains default. Carrier allocation is by tier class (A = t0+t1 books first, B = t3+t4 leftovers piggyback), fixing sweep-steals-carriers inversion. Verified: parity, centralize chain, 4-merchant contention (t1 served before sweep), torus pair dist 21, determinism, ~1ms/plan. Next: S3 (48h simulator + repair, A/B vs v1).**
