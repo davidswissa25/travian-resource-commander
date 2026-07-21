@@ -355,7 +355,8 @@ function celebrationNeedsPerHour(v){
 // if it is Still building - the Build buffer (optMargin) of every resource. Non-building villages
 // keep only their celebration reserve (celebration crop is already in consumption).
 function keepReserve(v){
-  const c=celebrationNeedsPerHour(v), b=v.stillBuilding?(optMargin||0):0;
+  // "Ignore celebrations" -> don't hold back any resources for the 24/7 celebration reserve.
+  const c=state.ignoreCeleb?{lumber:0,clay:0,iron:0,crop:0}:celebrationNeedsPerHour(v), b=v.stillBuilding?(optMargin||0):0;
   return {lumber:(c.lumber||0)+b, clay:(c.clay||0)+b, iron:(c.iron||0)+b, crop:b};
 }
 const fmt = n => Math.round(n).toLocaleString();
@@ -389,6 +390,7 @@ function normalizeProfile(p, label){
   if(p.allianceBonus==null) p.allianceBonus=0;
   if(p.defaultMarket==null) p.defaultMarket=0;
   if(p.ignoreProdBoost==null) p.ignoreProdBoost=false; // plan on base production, ignoring the (temporary) gold/ad production boost
+  if(p.ignoreCeleb==null) p.ignoreCeleb=false; // don't reserve resources for 24/7 celebrations
   if(p.ignoreHeroProd==null) p.ignoreHeroProd=false; // plan without the hero's resource production (the hero can move/die/be reassigned)
   if(p.troopCropExtra==null) p.troopCropExtra=5; // % extra crop on troop-training cost (newly-made troops add upkeep)
   if(!p.tauCache) p.tauCache={}; // learned one-way travel times per "fromDid>toDid>kind" ({sec,src,at}), from synced routes
@@ -481,7 +483,7 @@ function troopUpkeep(v){ return (v.troops||[]).reduce((s,t)=>s+(t.count||0)*(t.u
 // field (troopUpkeep), and celebration crop. The crop COST of *building* troops is deliberately
 // excluded - the game simply won't train when crop runs out, so it can't actually starve you, and it
 // shouldn't drag account net crop or the starvation clock negative.
-function consumption(v){ return (v.baseConsumption||0)+troopUpkeep(v)+celebrationNeedsPerHour(v).crop+Math.max(0,(v&&v.customNeed&&v.customNeed.crop)||0); }
+function consumption(v){ return (v.baseConsumption||0)+troopUpkeep(v)+(state.ignoreCeleb?0:celebrationNeedsPerHour(v).crop)+Math.max(0,(v&&v.customNeed&&v.customNeed.crop)||0); }
 // A village is a "supply target" (must be kept fed with lumber/clay/iron) if it makes troops OR carries
 // a manual custom requirement of any of those - so non-troop villages with a fixed demand get supplied too.
 function hasSupplyNeed(v){ if(v&&v.troopVillage) return true; const c=v&&v.customNeed; return !!c && (Math.max(0,c.lumber||0)+Math.max(0,c.clay||0)+Math.max(0,c.iron||0))>0.5; }
@@ -1349,6 +1351,7 @@ function renderOptimizer(){
       <label title="Auto-detected from the server name (e.g. x2)">Server speed: <b style="color:var(--accent);margin-left:4px">&times;${state.serverSpeed||1}</b></label>
       <label title="Alliance commerce bonus % applied to merchant capacity & speed (used only for villages without a game-synced real capacity)">Alliance trade %: <input type="number" value="${state.allianceBonus||0}" style="width:60px" onchange="state.allianceBonus=+this.value||0;save();renderAll()"></label>
       <label title="Your synced production already includes any active production boost, detected per resource from the game (+15% from watching ads, or +25% from Gold - either can lapse). Check this to plan on sustainable base production instead: the exact detected amount is stripped from each synced village."><input type="checkbox" ${state.ignoreProdBoost?'checked':''} onchange="state.ignoreProdBoost=this.checked;save();renderAll()"> Ignore production boost</label>
+      <label title="By default each village with a Town Hall holds back the resources to run a 24/7 celebration (crop in its consumption, lumber/clay/iron in its reserve). Check this to NOT reserve anything for celebrations - all that surplus becomes available to route."><input type="checkbox" ${state.ignoreCeleb?'checked':''} onchange="state.ignoreCeleb=this.checked;save();renderAll()"> Ignore celebrations</label>
       <label title="The hero's resource production is added to whatever village it currently sits in. Check this to plan without it (the hero can move, die, or be reassigned) - set each hero village's Hero production /h in its Edit form."><input type="checkbox" ${state.ignoreHeroProd?'checked':''} onchange="state.ignoreHeroProd=this.checked;save();renderAll()"> Ignore hero production</label>
       <span title="What the last game pull detected in your production numbers" style="font-size:11px;color:var(--faint);align-self:center">detected: <b style="color:${bs.active?'var(--accent)':'var(--faint)'}">${esc(bs.text)}</b></span>
       <label title="Extra % crop delivered to each troop village, scaling its whole crop draining — covers the growing upkeep of the troops being produced">Troop crop buffer %: <input type="number" min="0" value="${state.troopCropExtra==null?5:state.troopCropExtra}" style="width:50px" onchange="state.troopCropExtra=Math.max(0,+this.value||0);save();renderAll()"></label>
