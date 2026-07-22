@@ -417,6 +417,12 @@
     // for an element to be ready is always done with waitEl instead, so setting the delay to 0 only
     // makes things fast - it can never make a run fail.
     const pause = () => sleep(stepMs());
+    // Number of scheduled-send rows listed for the village on screen. The create dialog does NOT close
+    // on success - the game leaves it open - so "the dialog went away" is not a completion signal (it
+    // never happens). A new row appearing in the list is, and it is also what tells a real rejection
+    // apart from a success. List rows carry an unnamed checkbox; the dialog's own are named.
+    const listRowCount = () => [...document.querySelectorAll('input[type=checkbox]')]
+      .filter(c => !c.name && !c.closest('#tcApplyPanel')).length;
     // Panel order == batch order, so "create all" works down the list exactly as displayed.
     const collate = (a, b) => String(a || '').localeCompare(String(b || ''), undefined, { numeric: true, sensitivity: 'base' });
     const orderRoutes = list => (list || []).slice().sort((a, b) => collate(a.fromName, b.fromName) || collate(a.toName, b.toName));
@@ -519,11 +525,17 @@
       const btn = [...document.querySelectorAll('button')].find(b => /^\s*Create trade route\s*$/i.test(b.textContent || ''));
       if (!btn) return stopAuto('the Create button was not found');
       if (!(applyState().auto || {}).on) return false;            // stopped while the form was filling
+      const rowsBefore = listRowCount();
       await pause();                                            // beat before the destructive click
-      btn.click();
-      // the dialog closing is the game's own confirmation that it accepted the route
-      try { await waitEl(() => document.querySelector('select[name="did_dest"]') ? null : true, 9000); }
-      catch (e) { return stopAuto('the form stayed open for ' + route.fromName + ' → ' + route.toName + ' - the game refused it, so nothing after it was touched'); }
+      btn.click();                                              // exactly once - a retry would duplicate the route
+      // Success = a new send row in the list. The dialog does NOT close on success, so never re-click:
+      // the POST can succeed while the form stays up, and clicking again silently stacks a second
+      // schedule onto the same route (which is exactly how duplicates got made).
+      try { await waitEl(() => listRowCount() > rowsBefore ? true : null, 9000); }
+      catch (e) { return stopAuto('no new route row appeared for ' + route.fromName + ' → ' + route.toName + ' - the game did not accept it'); }
+      const closeBtn = [...document.querySelectorAll('button')].find(b => /^\s*Cancel\s*$/i.test(b.textContent || ''));
+      if (closeBtn) closeBtn.click();                           // dialog stays open after a create - close it
+      await sleep(300);
       const s = applyState(); (s.done = s.done || {})[route.id] = true; setApplyState(s);
       const plan0 = GM_getValue(APPLY_KEY, null), total = (plan0 && plan0.routes || []).length;
       const madeCount = Object.keys(s.done).length;
@@ -601,16 +613,20 @@
         let trash;
         try { trash = await waitEl(() => document.querySelector('button.delete'), 8000); }
         catch (e) { return stopDelete('the edit dialog did not open'); }
+        const rowsBefore = listRowCount();
         await pause();                                             // beat before the destructive click
         trash.click();
         await sleep(400);                                          // fixed: let a confirm step appear if there is one
-        // if this build asks to confirm, accept it (the dialog is still up when it does)
-        if (document.querySelector('button.delete')) {
-          const yes = [...document.querySelectorAll('button')].find(b => /^\s*(yes|ok|delete|confirm)\s*$/i.test(b.textContent || ''));
-          if (yes) yes.click();
-        }
-        try { await waitEl(() => document.querySelector('button.delete') ? null : true, 9000); }
-        catch (e) { return stopDelete('the edit dialog stayed open in ' + (v.name || 'this village') + ' - nothing was removed there'); }
+        // if this build asks to confirm, accept it (the trash icon has no text, so it can't self-match)
+        const yes = [...document.querySelectorAll('button')].find(b => /^\s*(yes|ok|delete|confirm)\s*$/i.test(b.textContent || ''));
+        if (yes && document.querySelector('button.delete')) yes.click();
+        // Like create, the dialog may well stay open, so rows disappearing from the list is the real
+        // proof - accept either that or the dialog closing, whichever happens first.
+        try { await waitEl(() => (listRowCount() < rowsBefore || !document.querySelector('button.delete')) ? true : null, 9000); }
+        catch (e) { return stopDelete('nothing was removed in ' + (v.name || 'this village') + ' - the route list did not change'); }
+        const closeBtn = [...document.querySelectorAll('button')].find(b => /^\s*Cancel\s*$/i.test(b.textContent || ''));
+        if (closeBtn && document.querySelector('button.delete')) closeBtn.click();
+        await sleep(300);
         const s = applyState(); if (s.del) { s.del.removed = (s.del.removed || 0) + 1; setApplyState(s); }
         toast('🗑 ' + ((applyState().del || {}).removed || 0) + ' deleted…', '#f0a92b');
         renderApplyPanel();
