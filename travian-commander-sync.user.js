@@ -413,6 +413,9 @@
       return [lo, hi];
     };
     const stepMs = () => { const r = stepRange(); return r[1] <= 0 ? 0 : r[0] + Math.floor(Math.random() * (r[1] - r[0] + 1)); };
+    // Panel order == batch order, so "create all" works down the list exactly as displayed.
+    const collate = (a, b) => String(a || '').localeCompare(String(b || ''), undefined, { numeric: true, sensitivity: 'base' });
+    const orderRoutes = list => (list || []).slice().sort((a, b) => collate(a.fromName, b.fromName) || collate(a.toName, b.toName));
     // Keep a dragged panel on screen (the window may be smaller than when the spot was chosen):
     // always leave its header grabbable rather than letting it strand off an edge.
     const clampPos = (x, y, el) => {
@@ -487,8 +490,65 @@
       const btn = await waitEl(() => [...document.querySelectorAll('button, a, div, span')].find(e => /^\s*Create new trade route\s*$/i.test((e.textContent || '').trim()) && e.offsetParent && e.getBoundingClientRect().height < 90));
       btn.click();
       const r = await fillCreateDialog(route);
-      toast('Pre-filled ' + route.fromName + ' → ' + route.toName + '. Review it and click "Create trade route".'
-        + (r && r.shipMissing ? ' NOTE: planned for trade ships, but ' + route.fromName + ' offers no "Use trade ships" option - it will go by merchants.' : ''), '#f5b342');
+      const shipNote = (r && r.shipMissing) ? ' NOTE: planned for trade ships, but ' + route.fromName + ' offers no "Use trade ships" option - it will go by merchants.' : '';
+      // during an automatic batch the "click Create" prompt would be wrong - createOne reports instead
+      if ((applyState().auto || {}).on) { if (shipNote) toast(route.fromName + ' → ' + route.toName + ':' + shipNote, '#f0a92b'); }
+      else toast('Pre-filled ' + route.fromName + ' → ' + route.toName + '. Review it and click "Create trade route".' + shipNote, '#f5b342');
+    }
+
+    /* ----- automatic batch: fill AND submit every route that isn't done yet -----
+       Unlike Pre-fill (which stops at the filled form for you), this presses Create itself. It walks
+       the panel's order, only reloading when the source village changes, verifies each route really
+       was created before counting it, and halts on the first thing it can't do rather than plough on. */
+    let autoBusy = false;
+    function stopAuto(msg, finished) {
+      const s = applyState(); s.auto = null; s.pending = null; setApplyState(s);
+      renderApplyPanel();
+      if (finished) toast('✓ Done - every route in the plan now exists in game.', '#3fb950');
+      else if (msg) toast('Auto-create stopped: ' + msg, '#f0533f');
+      return false;
+    }
+    // Fill the dialog for one route, press Create, and confirm the form actually closed.
+    async function createOne(route) {
+      try { await prefillHere(route); }
+      catch (e) { return stopAuto('could not fill ' + route.fromName + ' → ' + route.toName + ' (' + e.message + ')'); }
+      const btn = [...document.querySelectorAll('button')].find(b => /^\s*Create trade route\s*$/i.test(b.textContent || ''));
+      if (!btn) return stopAuto('the Create button was not found');
+      if (!(applyState().auto || {}).on) return false;            // stopped while the form was filling
+      await sleep(Math.max(250, stepMs()));
+      btn.click();
+      // the dialog closing is the game's own confirmation that it accepted the route
+      try { await waitEl(() => document.querySelector('select[name="did_dest"]') ? null : true, 9000); }
+      catch (e) { return stopAuto('the form stayed open for ' + route.fromName + ' → ' + route.toName + ' - the game refused it, so nothing after it was touched'); }
+      const s = applyState(); (s.done = s.done || {})[route.id] = true; setApplyState(s);
+      const plan0 = GM_getValue(APPLY_KEY, null), total = (plan0 && plan0.routes || []).length;
+      const madeCount = Object.keys(s.done).length;
+      toast('✓ ' + madeCount + '/' + total + '  ' + route.fromName + ' → ' + route.toName, '#3fb950');
+      renderApplyPanel();
+      await sleep(Math.max(400, stepMs()));
+      return true;
+    }
+    async function autoLoop() {
+      if (autoBusy) return;                                       // never run two batches at once
+      autoBusy = true;
+      try {
+        for (;;) {
+          const st0 = applyState();
+          if (!st0.auto || !st0.auto.on) return;                  // stopped by the user
+          const plan = GM_getValue(APPLY_KEY, null);
+          if (!plan || !plan.routes) return stopAuto('the plan is no longer available');
+          const next = orderRoutes(plan.routes).find(r => !(st0.done || {})[r.id]);
+          if (!next) return stopAuto(null, true);
+          if (st0.auto.curDid !== next.fromDid) {                 // different village: reload into it
+            const s = applyState();
+            s.pending = { rid: next.id, auto: true }; s.auto.curDid = next.fromDid; setApplyState(s);
+            await sleep(Math.max(300, stepMs()));
+            location.href = '/build.php?gid=17&t=3&newdid=' + next.fromDid;
+            return;                                               // resumeApply() takes over after the load
+          }
+          if (!await createOne(next)) return;                     // createOne already reported the stop
+        }
+      } finally { autoBusy = false; }
     }
 
     // Start one route: jump to its source village's Trade-routes tab; resumeApply() finishes after load.
@@ -505,9 +565,11 @@
     async function resumeApply() {
       const plan = GM_getValue(APPLY_KEY, null), st = applyState();
       if (!plan || !st || !st.pending) return;
+      const auto = !!st.pending.auto;
       const route = (plan.routes || []).find(r => r.id === st.pending.rid);
       st.pending = null; setApplyState(st);
       if (!route || !/gid=17/.test(location.href)) return;
+      if (auto) { if (await createOne(route)) autoLoop(); return; }   // batch: submit it, then carry on
       try { await prefillHere(route); } catch (e) { toast('Could not pre-fill: ' + e.message, '#f0533f'); }
     }
 
@@ -528,8 +590,7 @@
       // Group by SOURCE village and order naturally ("01 GAL" < "02 ROM" < "20 ROM" - numeric-aware, so
       // it matches the game's village list), destination as the tiebreak. Pre-fill jumps to the source
       // village, so keeping its routes together means fewer village switches while working down the list.
-      const coll = (a, b) => String(a || '').localeCompare(String(b || ''), undefined, { numeric: true, sensitivity: 'base' });
-      const ordered = plan.routes.slice().sort((a, b) => coll(a.fromName, b.fromName) || coll(a.toName, b.toName));
+      const ordered = orderRoutes(plan.routes);
       let lastFrom = null;
       const rows = ordered.map(r => {
         const dn = !!done[r.id];
@@ -555,9 +616,34 @@
           '<input id="tcStepMin" type="number" min="0" step="50" value="' + stepRange()[0] + '" style="width:56px;background:#1d2630;color:#e6edf3;border:1px solid #2a3744;border-radius:5px;padding:2px 4px;font:inherit">' +
           '<span>–</span>' +
           '<input id="tcStepMax" type="number" min="0" step="50" value="' + stepRange()[1] + '" style="width:56px;background:#1d2630;color:#e6edf3;border:1px solid #2a3744;border-radius:5px;padding:2px 4px;font:inherit">' +
-          '<span>ms, random per field</span></div>' + rows;
+          '<span>ms, random per field</span></div>' +
+        (function () {
+          const left = ordered.filter(r => !done[r.id]).length;
+          const running = !!(st.auto && st.auto.on);
+          if (running) return '<div style="margin:6px 0 2px;display:flex;align-items:center;gap:7px">' +
+            '<button id="tcAutoStop" style="cursor:pointer;background:#3a1d1d;color:#f0533f;border:1px solid #f0533f;border-radius:6px;padding:4px 10px;font:inherit;font-weight:600">■ Stop</button>' +
+            '<span style="color:#f0a92b">creating routes automatically…</span></div>';
+          return '<div style="margin:6px 0 2px"><button id="tcAutoAll"' + (left ? '' : ' disabled') +
+            ' title="Fill AND submit every remaining route, one after another. This presses Create for you." ' +
+            'style="cursor:' + (left ? 'pointer' : 'not-allowed') + ';background:#1d2630;color:' + (left ? '#f5b342' : '#5d6b78') +
+            ';border:1px solid #2a3744;border-radius:6px;padding:4px 10px;font:inherit;font-weight:600">▶ Create all ' + left + ' remaining</button></div>';
+        })() + rows;
       panel.querySelector('#tcApplyClose').onclick = () => { const s = applyState(); s.dismissed = plan.ts || Date.now(); setApplyState(s); panel.remove(); };
       panel.querySelector('#tcApplyReset').onclick = () => { const s = applyState(); s.done = {}; setApplyState(s); renderApplyPanel(); };
+      // Start / stop the automatic batch. Starting is behind a confirm because, unlike Pre-fill, this
+      // presses Create itself - every remaining route really will be created in game.
+      const aa = panel.querySelector('#tcAutoAll');
+      if (aa) aa.onclick = () => {
+        const left = ordered.filter(r => !done[r.id]).length;
+        if (!left) return;
+        if (!confirm('Create ' + left + ' trade route' + (left > 1 ? 's' : '') + ' in game automatically?\n\n' +
+                     'The script fills each form and presses Create itself, working down the list.\n' +
+                     'It stops on the first route the game refuses, and you can hit Stop at any time.')) return;
+        const s = applyState(); s.auto = { on: true, curDid: 0 }; s.pending = null; setApplyState(s);
+        renderApplyPanel(); autoLoop();
+      };
+      const as = panel.querySelector('#tcAutoStop');
+      if (as) as.onclick = () => { const s = applyState(); s.auto = null; s.pending = null; setApplyState(s); renderApplyPanel(); toast('Stopped - nothing further will be created.', '#f0a92b'); };
       // Drag the panel by its header. Position is stored, so it stays put across the page reloads
       // that Pre-fill triggers; double-clicking the header forgets it and snaps back to the corner.
       const head = panel.querySelector('#tcApplyHead');
@@ -599,7 +685,12 @@
     // is backed by (async) chrome.storage, so defer until the first read has landed - otherwise the
     // panel and the resume-after-navigation step would both read an empty store.
     const whenStore = fn => { try { if (typeof __tcWhenReady === 'function') return __tcWhenReady(fn); } catch (e) {} fn(); };
-    whenStore(() => { renderApplyPanel(); resumeApply(); });
+    whenStore(async () => {
+      renderApplyPanel();
+      const hadPending = !!applyState().pending;
+      await resumeApply();                                   // a pending step also continues the batch itself
+      if (!hadPending) { const s = applyState(); if (s.auto && s.auto.on) autoLoop(); }  // resume a batch cut short by a manual reload
+    });
     // a fresh plan pushed from the tool: reset progress and show the panel
     try { GM_addValueChangeListener(APPLY_KEY, (n, o, nv) => { const k = applyState(); setApplyState({ ts: (nv && nv.ts) || Date.now(), done: {}, pending: null, dismissed: 0, stepMin: k.stepMin, stepMax: k.stepMax, panelPos: k.panelPos }); renderApplyPanel(); }); } catch (e) {}
     try { GM_registerMenuCommand('Pull & Sync now', () => run(document.getElementById('tcPullSync'))); } catch (e) {}
