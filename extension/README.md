@@ -12,8 +12,10 @@ No Tampermonkey, no `file://` toggle, no cross-origin bridge.
 | Dashboard host | `dashboard.html` + `dashboard.js` | Extension page; frames the tool, bridges `chrome.storage` ↔ the iframe via `postMessage` |
 | Dashboard app | `tool.html` | The Resource Commander, run in a **sandboxed** iframe so its inline scripts work under MV3 |
 
-**Data flow:** game tab → content script → `chrome.storage.local` → dashboard bridge → `postMessage` → `applySyncedData()` in the tool.
+**Data flow (pull):** game tab → content script → `chrome.storage.local` (`tc_sync`) → dashboard bridge → `postMessage` → `applySyncedData()` in the tool.
+**Data flow (apply routes):** the reverse — tool's **Apply in game ▸** → `postMessage {__tc:'apply'}` → dashboard bridge → `chrome.storage.local` (`tc_apply`) → content script's **⚡ Apply routes** panel, which pre-fills the in-game *Create trade route* form per route. The user always presses **Create** themselves; nothing is submitted programmatically.
 **Persistence:** the tool's `localStorage` is shimmed to an in-memory store, seeded from / mirrored back to `chrome.storage.local` (the sandboxed page has no real `localStorage`).
+**GM shim:** `content.js` is generated from the userscript, whose `GM_*` calls are mapped onto `chrome.storage`. Because `chrome.storage` is async and `GM_getValue` is synchronous, the shim mirrors the store into a cache and exposes `__tcWhenReady(fn)` for work that must wait for the first load (the Apply panel and its resume-after-navigation step).
 
 ## Build
 

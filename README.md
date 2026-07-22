@@ -21,7 +21,7 @@ No install, no build step, no server: open `travian-tool.html` in any browser. D
 ## Files
 
 - `travian-tool.html` — the application. Double-click to open.
-- `travian-commander-sync.user.js` — optional read-only Tampermonkey userscript. Adds a one-click **⤓ Pull & Sync** button on the game that pushes every village's data straight into `travian-tool.html` (open in another tab) — no console, no file import. Captures production, current warehouse/granary stock + capacity, merchant capacity, **and your active recurring trade routes** (from each marketplace's Trade routes tab).
+- `travian-commander-sync.user.js` — optional Tampermonkey userscript. Adds a one-click **⤓ Pull & Sync** button on the game that pushes every village's data straight into `travian-tool.html` (open in another tab) — no console, no file import. Captures production, current warehouse/granary stock + capacity, merchant capacity, **and your active recurring trade routes** (from each marketplace's Trade routes tab). Pulling is read-only. It also powers the optional **Apply in game** flow (below): a game-side **⚡ Apply routes** panel that pre-fills the in-game *Create trade route* form for each suggested route — you review and press **Create** yourself; it never submits for you.
 
 ## Usage
 
@@ -32,6 +32,14 @@ No install, no build step, no server: open `travian-tool.html` in any browser. D
 3. Set each village's Trade Office and Marketplace level (and the alliance bonus / server URL) for exact merchant math, then use the **Auto Routes** tab.
 4. Check the **Trade Routes** tab: your active in-game routes appear automatically (synced routes are kept in step with the game — deleting one in-game removes it here on the next sync, while routes you add by hand are preserved), and the **Balance analysis** at the top shows which villages are draining or about to overflow once those routes are taken into account.
 
+## Applying routes in-game (semi-automatic)
+
+The **Auto Routes** tab has an **Apply in game ▸** button. It hands the proposed routes to your game tab, where a floating **⚡ Apply routes** panel lists them. For each route, **Pre-fill ▸** jumps to the source village's marketplace, opens *Create trade route*, and fills in destination, resources, interval and a staggered send time — then highlights **Create trade route** for you to check and click. You confirm every route; the script never presses Create.
+
+Works with the **Chrome extension** (see `extension/` — plan travels dashboard → `chrome.storage.local` → the game's content script) or the legacy Tampermonkey userscript. Only villages synced from the game (which carry an in-game id) can be applied; harbor/ship routes pre-fill resources but may need the trade-ship option set by hand. Needs Gold Club (recurring routes are a Gold Club feature).
+
+After changing `travian-tool.html` or `travian-commander-sync.user.js`, re-run `python extension/build.py` and reload the extension.
+
 ## Notes / disclaimer
 
-This tool only reads data you paste or view yourself; it performs no automated game actions. Automated scripting can violate Travian's Terms of Service — use at your own discretion.
+Pulling data is read-only. The optional **Apply in game** flow only ever *pre-fills* the in-game create-route form — it never creates, sends, or confirms anything on its own; you press **Create** for every route. Even so, using scripts to assist play can violate Travian's Terms of Service — use at your own discretion.

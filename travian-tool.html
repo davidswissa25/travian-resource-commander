@@ -1328,6 +1328,38 @@ function applyAutoPlan(){
   save(); setTab("routes");
   if(!plan.routes.length) alert("Nothing to apply — no routes were proposed.");
 }
+// Hand the current plan to the game side, which pre-fills the in-game "Create trade route" form for each
+// suggestion (semi-auto: you confirm every route with the game's own Create button). Routes are keyed by
+// game did, so only villages pulled from the game (which carry a did) can be applied; manual-only ones
+// are skipped and reported. Delivery: in the extension the tool is a sandboxed iframe, so the plan goes
+// parent.postMessage -> dashboard.js -> chrome.storage.local -> the game tab's content script.
+function applyRoutesToGame(){
+  const plan=buildAutoPlan(optMode);
+  if(!plan.routes.length){ alert("No routes to apply — generate a plan first."); return; }
+  const byId={}; state.villages.forEach(v=>byId[v.id]=v);
+  const routes=[], skipped=[];
+  plan.routes.forEach(r=>{
+    const from=byId[r.from], to=byId[r.to];
+    if(!from||!to||!from.did||!to.did){ skipped.push((from&&from.name||"?")+"→"+(to&&to.name||"?")); return; }
+    const useShips=(r.ships||0)>0 && !(r.merchants>0); // a route is merchants XOR ships; ship-only when no merchants
+    routes.push({ id:from.did+">"+to.did+">"+(useShips?"s":"m"), fromDid:from.did, toDid:to.did,
+      fromName:from.name, toName:to.name,
+      res:{lumber:r.resources.lumber||0,clay:r.resources.clay||0,iron:r.resources.iron||0,crop:r.resources.crop||0},
+      interval:snapInterval(r.interval||1), offsetHours:r.offsetHours||0, useShips });
+  });
+  if(!routes.length){ alert("None of these routes can be applied — their villages have no in-game id (did).\n\nPull & Sync first so villages carry their game id, then try again."); return; }
+  const payload={ account:{label:state.label, server:(state.serverUrl||"").replace(/^https?:\/\//,"")}, routes };
+  // Extension (normal): the tool runs in a sandboxed iframe, so hand the plan to the dashboard bridge,
+  // which stores it for the game tab's content script. Tampermonkey (legacy): call the injected hook.
+  let sent=false;
+  if(typeof window.tcApplyRoutes==="function"){ window.tcApplyRoutes(payload); sent=true; }
+  else if(window.parent && window.parent!==window){ try{ window.parent.postMessage({__tc:"apply", plan:payload}, "*"); sent=true; }catch(e){} }
+  if(sent){
+    alert("Sent "+routes.length+" route"+(routes.length>1?"s":"")+" to the game.\n\nSwitch to your Travian tab and use the ⚡ Apply routes panel (bottom-right): each opens the create form pre-filled for you to review and Create."+(skipped.length?"\n\nSkipped (no game id): "+skipped.join(", "):""));
+  } else {
+    alert("No bridge to the game was found.\n\nOpen this dashboard from the Resource Commander extension icon (not as a bare file), make sure the extension is loaded, and try again.");
+  }
+}
 function renderOptimizer(){
   const el=document.getElementById("tab-optimizer");
   if(state.villages.length<2){ el.innerHTML=`<div class="empty"><h3>Need at least 2 villages</h3><p>The optimizer moves surplus crop to villages that are draining.</p></div>`; return; }
@@ -1362,6 +1394,7 @@ function renderOptimizer(){
       <div class="grow"></div>
       <button class="primary" onclick="renderOptimizer()" title="Re-run the optimizer now with the settings above">&#8635; Generate routes</button>
       <button class="ghost" onclick="applyAutoPlan()" ${plan.routes.length?'':'disabled'} title="Save these suggested routes into your tracked Trade Routes (for dashboard projections) - it does not create anything in-game, use the +Route link per row for that">Save ${plan.routes.length} route${plan.routes.length===1?'':'s'}</button>
+      <button class="primary" onclick="applyRoutesToGame()" ${plan.routes.length?'':'disabled'} title="Send these routes to your open Travian tab, where the ⚡ Apply routes panel pre-fills the in-game 'Create trade route' form for each - you review and click Create yourself. Needs the Resource Commander extension (or the v1.12+ userscript).">Apply in game &#9656;</button>
     </div>
     <p class="note">${plan.summary}</p>
     ${plan.routes.length ? renderUnified(plan) : `<div class="empty"><h3>&#9989; Nothing to route</h3><p>No crop deficits${optMode==='all'?', troop/celebration shortfalls or overflow':''} that a donor can cover right now.</p></div>`}

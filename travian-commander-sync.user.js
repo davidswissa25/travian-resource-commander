@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Travian Commander - Pull & Sync bridge
 // @namespace    travian-commander
-// @version      1.11.0
-// @description  One-click: a "Pull & Sync" button on the game retrieves every village's tribe, marketplace level, Trade Office level, barracks & stable levels, production, net crop, current resource storages (warehouse/granary stock + capacity), computed merchant capacity and active recurring trade routes, then pushes it straight into the Resource Commander tool (open in another tab) - no console, no file import. Read-only on the game.
+// @version      1.12.0
+// @description  One-click: a "Pull & Sync" button on the game retrieves every village's tribe, marketplace level, Trade Office level, barracks & stable levels, production, net crop, current resource storages (warehouse/granary stock + capacity), computed merchant capacity and active recurring trade routes, then pushes it straight into the Resource Commander tool (open in another tab) - no console, no file import. Also applies the tool's suggested routes semi-automatically: a game-side "Apply routes" panel pre-fills the in-game Create-trade-route form for each suggestion, which you review and confirm (Create is never clicked for you). Pull is read-only; Apply only ever pre-fills - you press Create.
 // @author       you
 // @match        *://*.travian.com/*
 // @match        file:///*travian-tool.html*
@@ -361,7 +361,247 @@
       b.onclick = () => run(b);
       document.body.appendChild(b);
     }
+    /* ---------- APPLY suggested routes (semi-auto: pre-fill the create form, YOU confirm) ----------
+       The tool pushes a plan of routes (keyed by game did) into GM storage; here we render an
+       "Apply routes" panel. Per route we jump to its SOURCE village's marketplace Trade-routes tab,
+       open "Create new trade route", and pre-fill every field - then highlight Create for the user
+       to review and click. Create is NEVER clicked programmatically. */
+    const APPLY_KEY = 'tc_apply', AS_KEY = 'tc_apply_state';
+    const IVS = [1, 2, 3, 4, 6, 8, 12, 24];
+    const snapIv = h => IVS.reduce((b, x) => Math.abs(x - h) < Math.abs(b - h) ? x : b, IVS[0]);
+    const escH = s => String(s == null ? '' : s).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+    const nfmt = n => Math.round(+n || 0).toLocaleString();
+    // React-controlled inputs ignore a plain el.value= (a value tracker suppresses the change). Set
+    // through the prototype setter and fire input+change so React's own state updates too.
+    const setNative = (el, val) => {
+      if (!el) return false;
+      const proto = el.tagName === 'SELECT' ? HTMLSelectElement.prototype : HTMLInputElement.prototype;
+      Object.getOwnPropertyDescriptor(proto, 'value').set.call(el, String(val));
+      el.dispatchEvent(new Event('input', { bubbles: true }));
+      el.dispatchEvent(new Event('change', { bubbles: true }));
+      return true;
+    };
+    const waitEl = (fn, ms = 8000) => new Promise((res, rej) => {
+      const t0 = Date.now();
+      (function loop() { let v; try { v = fn(); } catch (e) {} if (v) return res(v); if (Date.now() - t0 > ms) return rej(new Error('the trade-route form did not appear')); setTimeout(loop, 150); })();
+    });
+    const sleep = ms => new Promise(r => setTimeout(r, ms));
+    // The dialog's time picker is in SERVER time, but the browser's clock can be in another zone
+    // (observed here: browser 2h ahead of the server), which would schedule every route off by that
+    // drift. Read the game's own "Server time: HH:MM:SS" header and count the offset from that.
+    function serverNow() {
+      const d = new Date();
+      const m = (document.body.innerText || '').match(/Server time:\s*(\d{1,2}):(\d{2})(?::(\d{2}))?/);
+      if (!m) return d;                                    // no clock on this page: fall back to local
+      const s = new Date(d);
+      s.setHours(+m[1], +m[2], +(m[3] || 0), 0);
+      return s;
+    }
+    const applyState = () => { try { return GM_getValue(AS_KEY, null) || { ts: 0, done: {}, pending: null, dismissed: 0 }; } catch (e) { return { ts: 0, done: {}, pending: null, dismissed: 0 }; } };
+    const setApplyState = s => { try { GM_setValue(AS_KEY, s); } catch (e) {} };
+    // Pace the form filling so you can actually watch each field land. The pause is drawn fresh from a
+    // user-set [min,max] range before every field, so it varies instead of ticking like a metronome.
+    // Range lives in the apply state, so it survives the navigation between routes. Both 0 = instant.
+    const STEP_MIN_DEFAULT = 300, STEP_MAX_DEFAULT = 700;
+    const stepRange = () => {
+      const s = applyState();
+      let lo = s.stepMin, hi = s.stepMax;
+      if (lo == null && hi == null && s.stepMs != null) lo = hi = +s.stepMs || 0;   // migrate the old single speed
+      lo = lo == null ? STEP_MIN_DEFAULT : Math.max(0, +lo || 0);
+      hi = hi == null ? STEP_MAX_DEFAULT : Math.max(0, +hi || 0);
+      if (hi < lo) { const t = lo; lo = hi; hi = t; }                               // tolerate an inverted range
+      return [lo, hi];
+    };
+    const stepMs = () => { const r = stepRange(); return r[1] <= 0 ? 0 : r[0] + Math.floor(Math.random() * (r[1] - r[0] + 1)); };
+    // Keep a dragged panel on screen (the window may be smaller than when the spot was chosen):
+    // always leave its header grabbable rather than letting it strand off an edge.
+    const clampPos = (x, y, el) => {
+      const w = (el && el.offsetWidth) || 332;
+      return [Math.max(0, Math.min(x, Math.max(0, window.innerWidth - Math.min(w, 120)))),
+              Math.max(0, Math.min(y, Math.max(0, window.innerHeight - 36)))];
+    };
+    // Briefly outline a field as it is filled, so the eye can follow which one just changed.
+    const flash = el => {
+      if (!el) return;
+      const o = el.style.outline, b = el.style.boxShadow;
+      el.style.outline = '2px solid #f5b342'; el.style.boxShadow = '0 0 8px rgba(245,179,66,.9)';
+      setTimeout(() => { el.style.outline = o; el.style.boxShadow = b; }, 450);
+    };
+
+    // Fill the (already-open) "Create trade route" dialog for one route; highlight Create at the end.
+    async function fillCreateDialog(route) {
+      // Wait until the destination <select> is POPULATED - i.e. React has finished mounting the dialog.
+      // Filling before that lets React's initial render clobber the values (fields snap back to empty),
+      // so wait for options, let it settle, fill, then verify and fill once more if it was reset.
+      const dest = await waitEl(() => { const s = document.querySelector('select[name="did_dest"]'); return s && s.options.length > 1 ? s : null; });
+      await sleep(300);
+      // Merchants vs trade ships is a checkbox ("Use trade ships"), present only on harbour villages.
+      // It switches the per-carrier capacity the dialog uses (e.g. 1,900 -> 9,500), so set it BEFORE the
+      // amounts. A plain .click() is what this React checkbox registers; setting .checked does nothing.
+      const paced = stepRange()[1] > 0;                      // false => fill instantly
+      const ship = document.querySelector('input[name="useTradeShips"]');
+      const shipMissing = !!route.useShips && !ship;
+      if (ship && !!ship.checked !== !!route.useShips) { flash(ship); try { ship.click(); } catch (e) {} await sleep(Math.max(200, stepMs())); }
+      // Filled one field at a time (each briefly outlined) so the sequence is watchable, with a fresh
+      // random pause before each; the retry pass below runs instantly, since it only exists to
+      // re-assert values React may have reset.
+      const fill = async (pace) => {
+        const set = (el, val) => { setNative(el, val); if (pace) flash(el); };
+        const gap = async () => { if (pace) await sleep(stepMs()); };
+        set(dest, route.toDid); await gap();
+        set(document.querySelector('input[name="r1"]'), route.res.lumber || 0); await gap();
+        set(document.querySelector('input[name="r2"]'), route.res.clay || 0); await gap();
+        set(document.querySelector('input[name="r3"]'), route.res.iron || 0); await gap();
+        set(document.querySelector('input[name="r4"]'), route.res.crop || 0); await gap();
+        set(document.querySelector('select[name="repeatEvery"]'), snapIv(route.interval || 1)); await gap();
+        // Departure = server clock + the plan's stagger offset, rounded UP to a whole hour - every
+        // allowed interval (1/2/3/4/6/8/12/24h) divides the day, so starting on the hour keeps every
+        // send on clean clock times instead of some arbitrary :37. Rounding up also leaves you a moment
+        // to review and press Create before the first send is due. This input is an UNCONTROLLED React
+        // field (props are type/name/size/disabled/defaultValue - no value/onChange), so the game reads
+        // the DOM at submit and setting .value is what counts; React never overwrites it.
+        const tEl = document.querySelector('input[name="time"]');
+        if (tEl) {
+          const d = new Date(serverNow().getTime() + (route.offsetHours || 0) * 3600000);
+          d.setSeconds(0, 0);
+          if (d.getMinutes() > 0) { d.setMinutes(0); d.setHours(d.getHours() + 1); }
+          set(tEl, String(d.getHours()).padStart(2, '0') + ':00');
+        }
+      };
+      await fill(paced); await sleep(200);
+      if (String(dest.value) !== String(route.toDid)) { await sleep(300); await fill(false); await sleep(150); }
+      if (String(dest.value) !== String(route.toDid)) throw new Error('"' + route.toName + '" is not selectable from ' + route.fromName + ' (not in its destination list)');
+      // clear the stale "No resources selected" message (React shows it until a field is blurred)
+      ['r1', 'r2', 'r3', 'r4'].forEach(n => { const el = document.querySelector('[name="' + n + '"]'); if (el) { el.dispatchEvent(new FocusEvent('focusin', { bubbles: true })); el.dispatchEvent(new FocusEvent('focusout', { bubbles: true })); } });
+      // Highlight Create so it is obvious what to confirm. A React re-render (triggered by the blur
+      // above) wipes an inline style, so re-apply it a few times over the next second.
+      const glow = () => { const c = [...document.querySelectorAll('button')].find(b => /^\s*Create trade route\s*$/i.test(b.textContent || '')); if (c) c.style.boxShadow = '0 0 0 3px #f5b342, 0 0 16px #f5b342'; return c; };
+      const create = glow();
+      [250, 700, 1400].forEach(ms => setTimeout(glow, ms));
+      if (create) { try { create.scrollIntoView({ block: 'center' }); } catch (e) {} }
+      return { shipMissing: shipMissing };
+    }
+
+    // Open the create dialog on the current (source) village and fill it.
+    async function prefillHere(route) {
+      const btn = await waitEl(() => [...document.querySelectorAll('button, a, div, span')].find(e => /^\s*Create new trade route\s*$/i.test((e.textContent || '').trim()) && e.offsetParent && e.getBoundingClientRect().height < 90));
+      btn.click();
+      const r = await fillCreateDialog(route);
+      toast('Pre-filled ' + route.fromName + ' → ' + route.toName + '. Review it and click "Create trade route".'
+        + (r && r.shipMissing ? ' NOTE: planned for trade ships, but ' + route.fromName + ' offers no "Use trade ships" option - it will go by merchants.' : ''), '#f5b342');
+    }
+
+    // Start one route: jump to its source village's Trade-routes tab; resumeApply() finishes after load.
+    function startPrefill(rid) {
+      const plan = GM_getValue(APPLY_KEY, null); if (!plan) return;
+      const route = (plan.routes || []).find(r => r.id === rid); if (!route) return;
+      const st = applyState(); st.pending = { rid: rid }; setApplyState(st);
+      // In the extension the store write is async (chrome.storage); navigating instantly can abort it
+      // and the pending step would be lost, so let it flush before leaving the page.
+      setTimeout(() => { location.href = '/build.php?gid=17&t=3&newdid=' + route.fromDid; }, 200);
+    }
+
+    // After the page (re)loads on the source village, finish a pending prefill (one-shot, can't loop).
+    async function resumeApply() {
+      const plan = GM_getValue(APPLY_KEY, null), st = applyState();
+      if (!plan || !st || !st.pending) return;
+      const route = (plan.routes || []).find(r => r.id === st.pending.rid);
+      st.pending = null; setApplyState(st);
+      if (!route || !/gid=17/.test(location.href)) return;
+      try { await prefillHere(route); } catch (e) { toast('Could not pre-fill: ' + e.message, '#f0533f'); }
+    }
+
+    function renderApplyPanel() {
+      const plan = GM_getValue(APPLY_KEY, null), st = applyState();
+      let panel = document.getElementById('tcApplyPanel');
+      if (!plan || !plan.routes || !plan.routes.length || (plan.ts || 0) <= (st.dismissed || 0)) { if (panel) panel.remove(); return; }
+      if (!panel) { panel = document.createElement('div'); panel.id = 'tcApplyPanel'; document.body.appendChild(panel); }
+      panel.style.cssText = 'position:fixed;bottom:56px;right:14px;z-index:2147483646;width:332px;max-height:64vh;overflow:auto;background:#171e26;color:#e6edf3;border:1px solid #2a3744;border-radius:10px;padding:10px 12px;font:12px/1.45 -apple-system,Segoe UI,sans-serif;box-shadow:0 8px 30px rgba(0,0,0,.5)';
+      // restore a dragged position (cssText above resets to the default corner each render)
+      const savedPos = applyState().panelPos;
+      if (savedPos && typeof savedPos.x === 'number') {
+        const p = clampPos(savedPos.x, savedPos.y, panel);
+        panel.style.left = p[0] + 'px'; panel.style.top = p[1] + 'px';
+        panel.style.right = 'auto'; panel.style.bottom = 'auto';
+      }
+      const done = st.done || {};
+      // Group by SOURCE village and order naturally ("01 GAL" < "02 ROM" < "20 ROM" - numeric-aware, so
+      // it matches the game's village list), destination as the tiebreak. Pre-fill jumps to the source
+      // village, so keeping its routes together means fewer village switches while working down the list.
+      const coll = (a, b) => String(a || '').localeCompare(String(b || ''), undefined, { numeric: true, sensitivity: 'base' });
+      const ordered = plan.routes.slice().sort((a, b) => coll(a.fromName, b.fromName) || coll(a.toName, b.toName));
+      let lastFrom = null;
+      const rows = ordered.map(r => {
+        const dn = !!done[r.id];
+        const res = [['\u{1FAB5}', r.res.lumber], ['\u{1F9F1}', r.res.clay], ['⛏', r.res.iron], ['\u{1F33E}', r.res.crop]].filter(x => x[1] > 0).map(x => x[0] + nfmt(x[1])).join(' ');
+        let head = '';
+        if (r.fromName !== lastFrom) {
+          lastFrom = r.fromName;
+          const n = ordered.filter(x => x.fromName === r.fromName).length;
+          head = '<div style="margin-top:7px;padding-top:6px;border-top:1px solid #2a3744;color:#f5b342;font-weight:600">\u{1F69A} ' + escH(r.fromName) +
+                 ' <span style="color:#5d6b78;font-weight:400">' + n + ' route' + (n > 1 ? 's' : '') + '</span></div>';
+        }
+        return head + '<div style="display:flex;gap:6px;align-items:center;padding:4px 0 4px 8px;' + (dn ? 'opacity:.45' : '') + '">' +
+          '<div style="flex:1;min-width:0">→ <b>' + escH(r.toName) + '</b><br><span style="color:#8b9aa8">' + res + ' · every ' + snapIv(r.interval) + 'h' + (r.useShips ? ' · ⛵' : '') + '</span></div>' +
+          (dn ? '<span style="color:#3fb950;font-size:15px" title="marked done">✓</span>'
+              : '<button data-rid="' + escH(r.id) + '" class="tcPre" style="cursor:pointer;background:#1d2630;color:#f5b342;border:1px solid #2a3744;border-radius:6px;padding:4px 8px;font:inherit;white-space:nowrap">Pre-fill ▸</button>' +
+                '<button data-rid="' + escH(r.id) + '" class="tcDone" title="mark as created / skip" style="cursor:pointer;background:transparent;color:#8b9aa8;border:1px solid #2a3744;border-radius:6px;padding:4px 7px;font:inherit">✓</button>') +
+          '</div>';
+      }).join('');
+      const dcount = ordered.filter(r => done[r.id]).length;
+      panel.innerHTML = '<div id="tcApplyHead" title="drag to move · double-click to snap back to the corner" style="display:flex;align-items:center;gap:6px;margin-bottom:4px;cursor:move;user-select:none"><span style="color:#5d6b78">⠿</span><b style="color:#f5b342">⚡ Apply routes</b><span style="color:#8b9aa8">' + dcount + '/' + plan.routes.length + '</span><span style="flex:1"></span><button id="tcApplyReset" title="reset progress" style="cursor:pointer;background:transparent;color:#8b9aa8;border:none;font:inherit">reset</button><button id="tcApplyClose" title="dismiss this plan" style="cursor:pointer;background:transparent;color:#8b9aa8;border:none;font-size:17px;line-height:1">×</button></div>' +
+        '<div style="color:#8b9aa8;margin-bottom:2px">Each opens the in-game create form <b>pre-filled</b> — you review &amp; click <b>Create trade route</b>. Nothing is created without your click.</div>' +
+        '<div style="color:#8b9aa8;margin:4px 0 1px;display:flex;align-items:center;gap:5px;flex-wrap:wrap" title="Before each field a random pause is drawn from this range. Set both to 0 to fill instantly.">fill delay ' +
+          '<input id="tcStepMin" type="number" min="0" step="50" value="' + stepRange()[0] + '" style="width:56px;background:#1d2630;color:#e6edf3;border:1px solid #2a3744;border-radius:5px;padding:2px 4px;font:inherit">' +
+          '<span>–</span>' +
+          '<input id="tcStepMax" type="number" min="0" step="50" value="' + stepRange()[1] + '" style="width:56px;background:#1d2630;color:#e6edf3;border:1px solid #2a3744;border-radius:5px;padding:2px 4px;font:inherit">' +
+          '<span>ms, random per field</span></div>' + rows;
+      panel.querySelector('#tcApplyClose').onclick = () => { const s = applyState(); s.dismissed = plan.ts || Date.now(); setApplyState(s); panel.remove(); };
+      panel.querySelector('#tcApplyReset').onclick = () => { const s = applyState(); s.done = {}; setApplyState(s); renderApplyPanel(); };
+      // Drag the panel by its header. Position is stored, so it stays put across the page reloads
+      // that Pre-fill triggers; double-clicking the header forgets it and snaps back to the corner.
+      const head = panel.querySelector('#tcApplyHead');
+      if (head) {
+        head.onmousedown = ev => {
+          if (ev.button !== 0 || (ev.target.closest && ev.target.closest('button,input,select'))) return;
+          ev.preventDefault();
+          const r = panel.getBoundingClientRect(), dx = ev.clientX - r.left, dy = ev.clientY - r.top;
+          panel.style.right = 'auto'; panel.style.bottom = 'auto';
+          const move = e => { const p = clampPos(e.clientX - dx, e.clientY - dy, panel); panel.style.left = p[0] + 'px'; panel.style.top = p[1] + 'px'; };
+          const up = () => {
+            document.removeEventListener('mousemove', move); document.removeEventListener('mouseup', up);
+            const rr = panel.getBoundingClientRect(), s = applyState();
+            s.panelPos = { x: Math.round(rr.left), y: Math.round(rr.top) }; setApplyState(s);
+          };
+          document.addEventListener('mousemove', move); document.addEventListener('mouseup', up);
+        };
+        head.ondblclick = ev => {
+          if (ev.target.closest && ev.target.closest('button,input,select')) return;
+          const s = applyState(); delete s.panelPos; setApplyState(s); renderApplyPanel();
+        };
+      }
+      // save on change only (not re-render), so typing in the boxes doesn't steal focus mid-edit
+      const mn = panel.querySelector('#tcStepMin'), mx = panel.querySelector('#tcStepMax');
+      const saveRange = () => { const s = applyState(); s.stepMin = Math.max(0, +mn.value || 0); s.stepMax = Math.max(0, +mx.value || 0); delete s.stepMs; setApplyState(s); };
+      if (mn) mn.onchange = saveRange;
+      if (mx) mx.onchange = saveRange;
+      panel.querySelectorAll('.tcPre').forEach(b => b.onclick = () => startPrefill(b.getAttribute('data-rid')));
+      panel.querySelectorAll('.tcDone').forEach(b => b.onclick = () => { const s = applyState(); (s.done = s.done || {})[b.getAttribute('data-rid')] = true; setApplyState(s); renderApplyPanel(); });
+    }
+
+    // Version marker on <html>, so you can tell at a glance which build is actually live:
+    // reloading an unpacked extension is what re-reads content.js - extension PAGES (dashboard/tool)
+    // are re-read from disk on every load, so the dashboard can be new while this script is still old.
+    // Check in the game tab's console: document.documentElement.dataset.tcVersion
+    try { document.documentElement.setAttribute('data-tc-version', '1.12.0'); } catch (e) {}
     addButton();
+    // Under Tampermonkey GM_getValue is synchronous so this runs at once; in the extension the GM shim
+    // is backed by (async) chrome.storage, so defer until the first read has landed - otherwise the
+    // panel and the resume-after-navigation step would both read an empty store.
+    const whenStore = fn => { try { if (typeof __tcWhenReady === 'function') return __tcWhenReady(fn); } catch (e) {} fn(); };
+    whenStore(() => { renderApplyPanel(); resumeApply(); });
+    // a fresh plan pushed from the tool: reset progress and show the panel
+    try { GM_addValueChangeListener(APPLY_KEY, (n, o, nv) => { const k = applyState(); setApplyState({ ts: (nv && nv.ts) || Date.now(), done: {}, pending: null, dismissed: 0, stepMin: k.stepMin, stepMax: k.stepMax, panelPos: k.panelPos }); renderApplyPanel(); }); } catch (e) {}
     try { GM_registerMenuCommand('Pull & Sync now', () => run(document.getElementById('tcPullSync'))); } catch (e) {}
   }
 
@@ -370,6 +610,18 @@
      ======================================================================= */
   if (isTool) {
     let lastTs = 0;
+
+    // Expose a hook the tool calls to push a plan of routes to create in-game. It lands in GM storage;
+    // the game tab's "Apply routes" panel picks it up. Semi-auto: the game only ever pre-fills the form.
+    try {
+      (typeof unsafeWindow !== 'undefined' ? unsafeWindow : window).tcApplyRoutes = plan => {
+        try {
+          GM_setValue('tc_apply', { ts: Date.now(), account: (plan && plan.account) || null, routes: (plan && plan.routes) || [] });
+          toast('✓ Sent ' + (((plan && plan.routes) || []).length) + ' route(s) to your game tab — open it and use the ⚡ Apply routes panel.', '#3fb950');
+          return true;
+        } catch (e) { return false; }
+      };
+    } catch (e) {}
 
     function apply(data) {
       if (!data || !data.villages || (data.ts || 0) <= lastTs) return;
