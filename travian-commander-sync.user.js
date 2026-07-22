@@ -423,6 +423,18 @@
     // apart from a success. List rows carry an unnamed checkbox; the dialog's own are named.
     const listRowCount = () => [...document.querySelectorAll('input[type=checkbox]')]
       .filter(c => !c.name && !c.closest('#tcApplyPanel')).length;
+    // The game's own answer, relayed by the MAIN-world hook (extension/page-hook.js): a trade-route
+    // create/delete API call and its status. This is fact rather than inference, so it beats any
+    // DOM-based guess about when the dialog closes or the list re-renders.
+    const netSeen = { POST: 0, DELETE: 0, any: 0 };
+    window.addEventListener('message', ev => {
+      const d = ev && ev.data;
+      if (!d || d.__tcNet !== 'trade-routes' || ev.source !== window) return;
+      netSeen.any = Date.now();
+      if (d.ok && netSeen[d.method] !== undefined) netSeen[d.method] = Date.now();
+    });
+    const confirmedByGame = (method, since, ms) => waitEl(() => netSeen[method] > since ? true : null, ms || 9000).then(() => true, () => false);
+    const dismissDialog = () => { const c = [...document.querySelectorAll('button')].find(b => /^\s*Cancel\s*$/i.test(b.textContent || '')); if (c) { c.click(); return true; } return false; };
     // Panel order == batch order, so "create all" works down the list exactly as displayed.
     const collate = (a, b) => String(a || '').localeCompare(String(b || ''), undefined, { numeric: true, sensitivity: 'base' });
     const orderRoutes = list => (list || []).slice().sort((a, b) => collate(a.fromName, b.fromName) || collate(a.toName, b.toName));
@@ -527,18 +539,20 @@
       if (!btn) return stopAuto('the Create button was not found');
       if (!(applyState().auto || {}).on) return false;            // stopped while the form was filling
       await pause();                                            // beat before the destructive click
+      const t0 = Date.now();
       btn.click();                                              // exactly once - a retry would duplicate the route
-      await sleep(700);                                         // let the POST land
-      // The game leaves the dialog up after a successful create AND the list behind it does not
-      // refresh while it is up - so close first, then look for the new row. Cancel undoes nothing
-      // here; the route is already posted, this only dismisses the form.
-      const dismiss = () => { const c = [...document.querySelectorAll('button')].find(b => /^\s*Cancel\s*$/i.test(b.textContent || '')); if (c) { c.click(); return true; } return false; };
-      dismiss();
-      await sleep(500);
-      // never re-click Create on failure: the POST may well have succeeded, and a second click
-      // silently stacks another schedule onto the same route (exactly how the duplicates were made)
-      try { await waitEl(() => listRowCount() > rowsBefore ? true : null, 9000); }
-      catch (e) { dismiss(); return stopAuto('no new route row appeared for ' + route.fromName + ' → ' + route.toName + ' - it may still have been created, so check before re-running'); }
+      // Wait for the game's own POST /api/v1/trade-routes to come back OK. Never re-click on failure:
+      // the POST may well have succeeded anyway, and a second click silently stacks another schedule
+      // onto the same route (exactly how the duplicates were made).
+      let ok = await confirmedByGame('POST', t0);
+      // the dialog stays up after a successful create, so dismiss it either way; this undoes nothing
+      dismissDialog();
+      await sleep(400);
+      // Only if the page hook isn't there at all (older extension build / Tampermonkey) fall back to
+      // the list growing - which is checked here, after dismissing, because it does not refresh while
+      // the dialog is up. That ordering was the bug in the previous two attempts.
+      if (!ok && !netSeen.any) ok = await waitEl(() => listRowCount() > rowsBefore ? true : null, 6000).then(() => true, () => false);
+      if (!ok) return stopAuto('the game did not confirm ' + route.fromName + ' → ' + route.toName + ' - it may still have been created, so check before re-running');
       const s = applyState(); (s.done = s.done || {})[route.id] = true; setApplyState(s);
       const plan0 = GM_getValue(APPLY_KEY, null), total = (plan0 && plan0.routes || []).length;
       const madeCount = Object.keys(s.done).length;
@@ -547,27 +561,25 @@
       await pause();
       return true;
     }
+    // Queue the next route and reload into its source village. Every route goes through a page load,
+    // even consecutive ones from the same village: after a create the marketplace is left in a state
+    // where the next attempt stalls, and a fresh page reliably clears it (reloading by hand was what
+    // un-stuck a stalled run). The reload also guarantees an up-to-date route list to compare against.
     async function autoLoop() {
       if (autoBusy) return;                                       // never run two batches at once
       autoBusy = true;
       try {
-        for (;;) {
-          const st0 = applyState();
-          if (!st0.auto || !st0.auto.on) return;                  // stopped by the user
-          const plan = GM_getValue(APPLY_KEY, null);
-          if (!plan || !plan.routes) return stopAuto('the plan is no longer available');
-          const next = orderRoutes(plan.routes).find(r => !(st0.done || {})[r.id]);
-          if (!next) return stopAuto(null, true);
-          if (st0.auto.curDid !== next.fromDid) {                 // different village: reload into it
-            const s = applyState();
-            s.pending = { rid: next.id, auto: true }; s.auto.curDid = next.fromDid; setApplyState(s);
-            await sleep(Math.max(200, stepMs()));   // floor: let the async storage write land before unload
-            location.href = '/build.php?gid=17&t=3&newdid=' + next.fromDid;
-            return;                                               // resumeApply() takes over after the load
-          }
-          if (!await createOne(next)) return;                     // createOne already reported the stop
-        }
-      } finally { autoBusy = false; }
+        const st0 = applyState();
+        if (!st0.auto || !st0.auto.on) return;                    // stopped by the user
+        const plan = GM_getValue(APPLY_KEY, null);
+        if (!plan || !plan.routes) return stopAuto('the plan is no longer available');
+        const next = orderRoutes(plan.routes).find(r => !(st0.done || {})[r.id]);
+        if (!next) return stopAuto(null, true);
+        const s = applyState();
+        s.pending = { rid: next.id, auto: true }; s.auto.curDid = next.fromDid; setApplyState(s);
+        await sleep(Math.max(200, stepMs()));       // floor: let the async storage write land before unload
+        location.href = '/build.php?gid=17&t=3&newdid=' + next.fromDid;
+      } finally { autoBusy = false; }                             // resumeApply() takes over after the load
     }
 
     /* ----- delete existing trade routes -----

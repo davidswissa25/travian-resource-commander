@@ -9,6 +9,7 @@ No Tampermonkey, no `file://` toggle, no cross-origin bridge.
 |---|---|---|
 | Service worker | `background.js` | Toolbar icon → open/focus the dashboard tab |
 | Content script | `content.js` | On `*.travian.com`: injects the **⤓ Pull & Sync** button, reads every village (read-only), writes to `chrome.storage.local` |
+| Page hook | `page-hook.js` | Same pages but injected with `"world": "MAIN"`, the only place the game's own `fetch`/XHR are visible. Observes `/api/v1/trade-routes` calls and relays `{status, ok}` to `content.js` via `postMessage`. Read-only: it never alters a request or response. Exists because the create dialog stays open on success and the route list behind it doesn't refresh until dismissed, so every DOM-based success test is a guess — this reports the game's actual answer |
 | Dashboard host | `dashboard.html` + `dashboard.js` | Extension page; frames the tool, bridges `chrome.storage` ↔ the iframe via `postMessage` |
 | Dashboard app | `tool.html` | The Resource Commander, run in a **sandboxed** iframe so its inline scripts work under MV3 |
 
