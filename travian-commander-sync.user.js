@@ -2,7 +2,7 @@
 // @name         Travian Commander - Pull & Sync bridge
 // @namespace    travian-commander
 // @version      1.12.0
-// @description  One-click: a "Pull & Sync" button on the game retrieves every village's tribe, marketplace level, Trade Office level, barracks & stable levels, production, net crop, current resource storages (warehouse/granary stock + capacity), computed merchant capacity and active recurring trade routes, then pushes it straight into the Resource Commander tool (open in another tab) - no console, no file import. Also applies the tool's suggested routes semi-automatically: a game-side "Apply routes" panel pre-fills the in-game Create-trade-route form for each suggestion, which you review and confirm (Create is never clicked for you). Pull is read-only; Apply only ever pre-fills - you press Create.
+// @description  One-click: a "Pull & Sync" button on the game retrieves every village's tribe, marketplace level, Trade Office level, barracks & stable levels, production, net crop, current resource storages (warehouse/granary stock + capacity), computed merchant capacity and active recurring trade routes, then pushes it straight into the Resource Commander tool (open in another tab) - no console, no file import. It also applies the tool's suggested routes: an "Apply routes" panel pre-fills the in-game Create-trade-route form per route for you to confirm, and can optionally create them all, or delete existing routes, on its own. Pulling is read-only; creating and deleting are opt-in, confirm first and can be stopped mid-run.
 // @author       you
 // @match        *://*.travian.com/*
 // @match        file:///*travian-tool.html*
@@ -413,6 +413,10 @@
       return [lo, hi];
     };
     const stepMs = () => { const r = stepRange(); return r[1] <= 0 ? 0 : r[0] + Math.floor(Math.random() * (r[1] - r[0] + 1)); };
+    // One user-paced beat, used between every visible step of filling, creating and deleting. Waiting
+    // for an element to be ready is always done with waitEl instead, so setting the delay to 0 only
+    // makes things fast - it can never make a run fail.
+    const pause = () => sleep(stepMs());
     // Panel order == batch order, so "create all" works down the list exactly as displayed.
     const collate = (a, b) => String(a || '').localeCompare(String(b || ''), undefined, { numeric: true, sensitivity: 'base' });
     const orderRoutes = list => (list || []).slice().sort((a, b) => collate(a.fromName, b.fromName) || collate(a.toName, b.toName));
@@ -444,7 +448,7 @@
       const paced = stepRange()[1] > 0;                      // false => fill instantly
       const ship = document.querySelector('input[name="useTradeShips"]');
       const shipMissing = !!route.useShips && !ship;
-      if (ship && !!ship.checked !== !!route.useShips) { flash(ship); try { ship.click(); } catch (e) {} await sleep(Math.max(200, stepMs())); }
+      if (ship && !!ship.checked !== !!route.useShips) { flash(ship); try { ship.click(); } catch (e) {} await pause(); }
       // Filled one field at a time (each briefly outlined) so the sequence is watchable, with a fresh
       // random pause before each; the retry pass below runs instantly, since it only exists to
       // re-assert values React may have reset.
@@ -515,7 +519,7 @@
       const btn = [...document.querySelectorAll('button')].find(b => /^\s*Create trade route\s*$/i.test(b.textContent || ''));
       if (!btn) return stopAuto('the Create button was not found');
       if (!(applyState().auto || {}).on) return false;            // stopped while the form was filling
-      await sleep(Math.max(250, stepMs()));
+      await pause();                                            // beat before the destructive click
       btn.click();
       // the dialog closing is the game's own confirmation that it accepted the route
       try { await waitEl(() => document.querySelector('select[name="did_dest"]') ? null : true, 9000); }
@@ -525,7 +529,7 @@
       const madeCount = Object.keys(s.done).length;
       toast('✓ ' + madeCount + '/' + total + '  ' + route.fromName + ' → ' + route.toName, '#3fb950');
       renderApplyPanel();
-      await sleep(Math.max(400, stepMs()));
+      await pause();
       return true;
     }
     async function autoLoop() {
@@ -542,7 +546,7 @@
           if (st0.auto.curDid !== next.fromDid) {                 // different village: reload into it
             const s = applyState();
             s.pending = { rid: next.id, auto: true }; s.auto.curDid = next.fromDid; setApplyState(s);
-            await sleep(Math.max(300, stepMs()));
+            await sleep(Math.max(200, stepMs()));   // floor: let the async storage write land before unload
             location.href = '/build.php?gid=17&t=3&newdid=' + next.fromDid;
             return;                                               // resumeApply() takes over after the load
           }
@@ -585,16 +589,21 @@
         const head = boxes.find(c => { const r = c.closest('tr,div'); return r && /^Resource\b/.test(((r.innerText) || '').trim()); });
         if (!head) return true;                                    // nothing left in this village
         if (!head.checked) head.click();
-        await sleep(Math.max(200, stepMs()));
-        const edit = [...document.querySelectorAll('button')].find(b => /Edit selected/i.test(b.textContent || '') && !/\bdisabled\b/.test((b.className || '').toString()));
-        if (!edit) return stopDelete('"Edit selected" never became available');
+        await pause();
+        // wait for the button to actually enable rather than trusting the pause to have been long
+        // enough - otherwise a 0 delay would race React and abort the run
+        let edit;
+        try {
+          edit = await waitEl(() => [...document.querySelectorAll('button')]
+            .find(b => /Edit selected/i.test(b.textContent || '') && !/\bdisabled\b/.test((b.className || '').toString())) || null, 6000);
+        } catch (e) { return stopDelete('"Edit selected" never became available'); }
         edit.click();
         let trash;
         try { trash = await waitEl(() => document.querySelector('button.delete'), 8000); }
         catch (e) { return stopDelete('the edit dialog did not open'); }
-        await sleep(Math.max(250, stepMs()));
+        await pause();                                             // beat before the destructive click
         trash.click();
-        await sleep(500);
+        await sleep(400);                                          // fixed: let a confirm step appear if there is one
         // if this build asks to confirm, accept it (the dialog is still up when it does)
         if (document.querySelector('button.delete')) {
           const yes = [...document.querySelectorAll('button')].find(b => /^\s*(yes|ok|delete|confirm)\s*$/i.test(b.textContent || ''));
@@ -605,7 +614,7 @@
         const s = applyState(); if (s.del) { s.del.removed = (s.del.removed || 0) + 1; setApplyState(s); }
         toast('🗑 ' + ((applyState().del || {}).removed || 0) + ' deleted…', '#f0a92b');
         renderApplyPanel();
-        await sleep(Math.max(400, stepMs()));
+        await pause();
       }
     }
     async function deleteLoop() {
@@ -619,7 +628,7 @@
           const v = list[s0.del.i];
           if (s0.del.curDid !== v.id) {                            // hop to the next village (page reload)
             const s = applyState(); s.del.curDid = v.id; setApplyState(s);
-            await sleep(Math.max(300, stepMs()));
+            await sleep(Math.max(200, stepMs()));   // floor: let the async storage write land before unload
             location.href = '/build.php?gid=17&t=3&newdid=' + v.id;
             return;                                                // the boot resume continues after load
           }
@@ -691,11 +700,11 @@
       const dcount = ordered.filter(r => done[r.id]).length;
       panel.innerHTML = '<div id="tcApplyHead" title="drag to move · double-click to snap back to the corner" style="display:flex;align-items:center;gap:6px;margin-bottom:4px;cursor:move;user-select:none"><span style="color:#5d6b78">⠿</span><b style="color:#f5b342">⚡ Apply routes</b><span style="color:#8b9aa8">' + dcount + '/' + plan.routes.length + '</span><span style="flex:1"></span><button id="tcApplyReset" title="reset progress" style="cursor:pointer;background:transparent;color:#8b9aa8;border:none;font:inherit">reset</button><button id="tcApplyClose" title="dismiss this plan" style="cursor:pointer;background:transparent;color:#8b9aa8;border:none;font-size:17px;line-height:1">×</button></div>' +
         '<div style="color:#8b9aa8;margin-bottom:2px">Each opens the in-game create form <b>pre-filled</b> — you review &amp; click <b>Create trade route</b>. Nothing is created without your click.</div>' +
-        '<div style="color:#8b9aa8;margin:4px 0 1px;display:flex;align-items:center;gap:5px;flex-wrap:wrap" title="Before each field a random pause is drawn from this range. Set both to 0 to fill instantly.">fill delay ' +
+        '<div style="color:#8b9aa8;margin:4px 0 1px;display:flex;align-items:center;gap:5px;flex-wrap:wrap" title="A random pause drawn from this range before every step - each field while filling, and each click while creating or deleting. Set both to 0 to run at full speed.">step delay ' +
           '<input id="tcStepMin" type="number" min="0" step="50" value="' + stepRange()[0] + '" style="width:56px;background:#1d2630;color:#e6edf3;border:1px solid #2a3744;border-radius:5px;padding:2px 4px;font:inherit">' +
           '<span>–</span>' +
           '<input id="tcStepMax" type="number" min="0" step="50" value="' + stepRange()[1] + '" style="width:56px;background:#1d2630;color:#e6edf3;border:1px solid #2a3744;border-radius:5px;padding:2px 4px;font:inherit">' +
-          '<span>ms, random per field</span></div>' +
+          '<span>ms, random per step</span></div>' +
         (function () {
           const left = ordered.filter(r => !done[r.id]).length;
           const stopBtn = (id, label) => '<div style="margin:6px 0 2px;display:flex;align-items:center;gap:7px">' +
