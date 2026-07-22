@@ -520,22 +520,25 @@
     }
     // Fill the dialog for one route, press Create, and confirm the form actually closed.
     async function createOne(route) {
+      const rowsBefore = listRowCount();                        // measured with no dialog covering the list
       try { await prefillHere(route); }
       catch (e) { return stopAuto('could not fill ' + route.fromName + ' → ' + route.toName + ' (' + e.message + ')'); }
       const btn = [...document.querySelectorAll('button')].find(b => /^\s*Create trade route\s*$/i.test(b.textContent || ''));
       if (!btn) return stopAuto('the Create button was not found');
       if (!(applyState().auto || {}).on) return false;            // stopped while the form was filling
-      const rowsBefore = listRowCount();
       await pause();                                            // beat before the destructive click
       btn.click();                                              // exactly once - a retry would duplicate the route
-      // Success = a new send row in the list. The dialog does NOT close on success, so never re-click:
-      // the POST can succeed while the form stays up, and clicking again silently stacks a second
-      // schedule onto the same route (which is exactly how duplicates got made).
+      await sleep(700);                                         // let the POST land
+      // The game leaves the dialog up after a successful create AND the list behind it does not
+      // refresh while it is up - so close first, then look for the new row. Cancel undoes nothing
+      // here; the route is already posted, this only dismisses the form.
+      const dismiss = () => { const c = [...document.querySelectorAll('button')].find(b => /^\s*Cancel\s*$/i.test(b.textContent || '')); if (c) { c.click(); return true; } return false; };
+      dismiss();
+      await sleep(500);
+      // never re-click Create on failure: the POST may well have succeeded, and a second click
+      // silently stacks another schedule onto the same route (exactly how the duplicates were made)
       try { await waitEl(() => listRowCount() > rowsBefore ? true : null, 9000); }
-      catch (e) { return stopAuto('no new route row appeared for ' + route.fromName + ' → ' + route.toName + ' - the game did not accept it'); }
-      const closeBtn = [...document.querySelectorAll('button')].find(b => /^\s*Cancel\s*$/i.test(b.textContent || ''));
-      if (closeBtn) closeBtn.click();                           // dialog stays open after a create - close it
-      await sleep(300);
+      catch (e) { dismiss(); return stopAuto('no new route row appeared for ' + route.fromName + ' → ' + route.toName + ' - it may still have been created, so check before re-running'); }
       const s = applyState(); (s.done = s.done || {})[route.id] = true; setApplyState(s);
       const plan0 = GM_getValue(APPLY_KEY, null), total = (plan0 && plan0.routes || []).length;
       const madeCount = Object.keys(s.done).length;
