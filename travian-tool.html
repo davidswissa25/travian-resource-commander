@@ -377,6 +377,7 @@ function loadOptSettings(){
 }
 let pasteResults = [];
 let balancePer = 1; // Balance-analysis display window in hours: 1 = per hour, 24 = per day
+let routeFilter = "all"; // Trade Routes tab: show all routes, or only one source (auto/synced/manual)
 
 /* ---- profiles: each account (yours + the ones you sit) is its own profile ---- */
 function normalizeProfile(p, label){
@@ -2083,15 +2084,39 @@ function renderAnalysis(){
 function setBalancePer(p){ balancePer = (p===24?24:1); renderAll(); }
 
 /* ---- routes tab ---- */
+// Where a tracked route came from. Three distinct origins, and the difference matters: "Save routes"
+// replaces only the auto ones, while synced ones are owned by Pull & Sync (deleting one in-game
+// removes it here on the next sync) and manual ones are never touched by either.
+function routeSource(r){ return r.auto ? "auto" : (r.synced ? "synced" : "manual"); }
+const ROUTE_SRC={
+  auto:   {label:"&#9889; auto", color:"var(--accent)", title:"Proposed by the Auto Routes planner and saved here. Re-saving a from-scratch plan replaces these."},
+  synced: {label:"synced",       color:"var(--ok)",     title:"Read from the game by Pull & Sync. Kept in step with your in-game routes - delete one in-game and it disappears here on the next sync."},
+  manual: {label:"manual",       color:"var(--dim)",    title:"Added by hand in this tool. Never replaced by the planner or by a sync."}
+};
+function setRouteFilter(f){ routeFilter=f; renderRoutes(); }
 function renderRoutes(){
   const el=document.getElementById("tab-routes");
   const head=`<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px"><p class="note" style="margin:0">Flow = <code>resources &divide; interval</code>, shown per the rate window selected above. Routes feed dashboard projections.</p><button class="primary" onclick="openRoute()" ${state.villages.length<2?'disabled':''}>+ Route</button></div>`;
   if(!state.routes.length){ el.innerHTML=head+`<div class="empty"><h3>No routes</h3><p>Add one manually, sync them from the game, or let <b>Auto Routes &#9889;</b> build a crop-balancing plan.</p></div>`; return; }
   const name=id=>{ const v=state.villages.find(v=>v.id===id); return v?v.name:"?"; };
   const per=balancePer===24?24:1, unit=per===24?"/24h":"/h"; // flow columns follow the same toggle
-  el.innerHTML=head+`<table><thead><tr><th>From</th><th>To</th><th class="num">Lumber ${unit}</th><th class="num">Clay ${unit}</th><th class="num">Iron ${unit}</th><th class="num">Crop ${unit}</th><th class="num" title="How often the route repeats">Every</th><th class="num" title="Minute offset within the cycle so sends are staggered">Offset</th><th class="num">Merchants</th><th></th></tr></thead><tbody>
-  ${state.routes.map(r=>{ const fl=k=>(r.resources&&r.resources[k]||0)/(r.intervalHours||1)*per; // resources / interval, scaled to the window
-    return `<tr><td>${esc(name(r.from))}</td><td>${esc(name(r.to))}</td><td class="num">${fmt(fl("lumber"))}</td><td class="num">${fmt(fl("clay"))}</td><td class="num">${fmt(fl("iron"))}</td><td class="num" style="color:var(--crop)">${fmt(fl("crop"))}</td><td class="num">${r.intervalHours||1}h</td><td class="num">${hhmm(r.offsetHours||0)}</td><td class="num">${r.merchants||"&mdash;"} ${r.auto?'<span class="pill ok">auto</span>':''}</td><td class="num">${(()=>{const sl=sendLink(state.villages.find(v=>v.id===r.from),state.villages.find(v=>v.id===r.to),(r.resources&&r.resources.crop)||0);return sl?'<a href="'+sl+'" target="_blank" style="color:var(--accent);margin-right:6px">Send</a>':'';})()}<button class="sm" onclick="openRoute('${r.id}')">&#9998;</button> <button class="sm danger" onclick="delRoute('${r.id}')">&#10005;</button></td></tr>`;
+  // totals by origin, doubling as filters
+  const counts={auto:0,synced:0,manual:0};
+  state.routes.forEach(r=>counts[routeSource(r)]++);
+  const total=state.routes.length;
+  const chip=k=>{ const c=ROUTE_SRC[k], on=routeFilter===k;
+    return `<button class="sm${on?' primary':''}" title="${c.title} &mdash; click to show only these" onclick="setRouteFilter('${on?'all':k}')"${on?'':` style="color:${c.color}"`}>${c.label} <b>${counts[k]}</b></button>`; };
+  const summary=`<div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:12px">
+    <span><b style="font-size:15px">${total}</b> route${total===1?'':'s'} total</span><span style="color:var(--faint)">&middot;</span>
+    ${chip("auto")}${chip("synced")}${chip("manual")}
+    ${routeFilter!=="all"?`<button class="sm ghost" onclick="setRouteFilter('all')">&times; clear filter</button>`:''}
+  </div>`;
+  const shown=state.routes.filter(r=>routeFilter==="all"||routeSource(r)===routeFilter);
+  if(!shown.length){ el.innerHTML=head+summary+`<div class="empty"><h3>No ${esc(routeFilter)} routes</h3><p>You have none from this source yet.</p></div>`; return; }
+  el.innerHTML=head+summary+`<table><thead><tr><th>From</th><th>To</th><th class="num">Lumber ${unit}</th><th class="num">Clay ${unit}</th><th class="num">Iron ${unit}</th><th class="num">Crop ${unit}</th><th class="num" title="How often the route repeats">Every</th><th class="num" title="Minute offset within the cycle so sends are staggered">Offset</th><th class="num">Merchants</th><th title="Where this route came from">Source</th><th></th></tr></thead><tbody>
+  ${shown.map(r=>{ const fl=k=>(r.resources&&r.resources[k]||0)/(r.intervalHours||1)*per; // resources / interval, scaled to the window
+    const s=ROUTE_SRC[routeSource(r)];
+    return `<tr><td>${esc(name(r.from))}</td><td>${esc(name(r.to))}</td><td class="num">${fmt(fl("lumber"))}</td><td class="num">${fmt(fl("clay"))}</td><td class="num">${fmt(fl("iron"))}</td><td class="num" style="color:var(--crop)">${fmt(fl("crop"))}</td><td class="num">${r.intervalHours||1}h</td><td class="num">${hhmm(r.offsetHours||0)}</td><td class="num">${r.merchants||"&mdash;"}</td><td><span title="${s.title}" style="font-size:11px;color:${s.color};border:1px solid ${s.color};border-radius:4px;padding:1px 6px;white-space:nowrap">${s.label}</span></td><td class="num">${(()=>{const sl=sendLink(state.villages.find(v=>v.id===r.from),state.villages.find(v=>v.id===r.to),(r.resources&&r.resources.crop)||0);return sl?'<a href="'+sl+'" target="_blank" style="color:var(--accent);margin-right:6px">Send</a>':'';})()}<button class="sm" onclick="openRoute('${r.id}')">&#9998;</button> <button class="sm danger" onclick="delRoute('${r.id}')">&#10005;</button></td></tr>`;
   }).join("")}</tbody></table>`;
 }
 
