@@ -551,6 +551,85 @@
       } finally { autoBusy = false; }
     }
 
+    /* ----- delete existing trade routes -----
+       The game's own flow, automated: tick a route's group checkbox (which selects all of that
+       route's scheduled sends), press "Edit selected", then the trash button in the dialog. Repeats
+       until a village has none left, optionally walking every village. Destructive and not undoable
+       from here, so both entry points confirm first. */
+    let delBusy = false;
+    function stopDelete(msg, finished) {
+      const s = applyState(); const n = (s.del || {}).removed || 0;
+      s.del = null; setApplyState(s); renderApplyPanel();
+      if (finished) toast('✓ Deleted ' + n + ' trade route(s).', '#3fb950');
+      else if (msg) toast('Delete stopped after ' + n + ': ' + msg, '#f0533f');
+      return false;
+    }
+    // Every village of this account, as [{id,name}] - same villageList the puller reads.
+    async function villageDids() {
+      const root = await getText('/dorf1.php');
+      const i = root.indexOf('"villageList":');
+      if (i < 0) throw new Error('not logged into the game world');
+      let d = 0, s = root.indexOf('[', i), j = s;
+      for (; j < root.length; j++) { const c = root[j]; if (c === '[') d++; else if (c === ']') { d--; if (!d) { j++; break; } } }
+      const out = [];
+      JSON.parse(root.slice(s, j)).forEach(e => e.villages ? e.villages.forEach(v => out.push({ id: v.id, name: v.name })) : out.push({ id: e.id, name: e.name }));
+      return out;
+    }
+    // Remove every route on the trade-routes tab currently open.
+    async function deleteHere(v) {
+      for (let guard = 0; ; guard++) {
+        if (guard > 40) return stopDelete('too many attempts on one village - something is not clearing');
+        const s0 = applyState(); if (!s0.del || !s0.del.on) return false;
+        const boxes = [...document.querySelectorAll('input[type=checkbox]')].filter(c => c.offsetParent && !c.closest('#tcApplyPanel'));
+        // the group checkbox is the one on the "Resource" header row; ticking it selects that whole route
+        const head = boxes.find(c => { const r = c.closest('tr,div'); return r && /^Resource\b/.test(((r.innerText) || '').trim()); });
+        if (!head) return true;                                    // nothing left in this village
+        if (!head.checked) head.click();
+        await sleep(Math.max(200, stepMs()));
+        const edit = [...document.querySelectorAll('button')].find(b => /Edit selected/i.test(b.textContent || '') && !/\bdisabled\b/.test((b.className || '').toString()));
+        if (!edit) return stopDelete('"Edit selected" never became available');
+        edit.click();
+        let trash;
+        try { trash = await waitEl(() => document.querySelector('button.delete'), 8000); }
+        catch (e) { return stopDelete('the edit dialog did not open'); }
+        await sleep(Math.max(250, stepMs()));
+        trash.click();
+        await sleep(500);
+        // if this build asks to confirm, accept it (the dialog is still up when it does)
+        if (document.querySelector('button.delete')) {
+          const yes = [...document.querySelectorAll('button')].find(b => /^\s*(yes|ok|delete|confirm)\s*$/i.test(b.textContent || ''));
+          if (yes) yes.click();
+        }
+        try { await waitEl(() => document.querySelector('button.delete') ? null : true, 9000); }
+        catch (e) { return stopDelete('the edit dialog stayed open in ' + (v.name || 'this village') + ' - nothing was removed there'); }
+        const s = applyState(); if (s.del) { s.del.removed = (s.del.removed || 0) + 1; setApplyState(s); }
+        toast('🗑 ' + ((applyState().del || {}).removed || 0) + ' deleted…', '#f0a92b');
+        renderApplyPanel();
+        await sleep(Math.max(400, stepMs()));
+      }
+    }
+    async function deleteLoop() {
+      if (delBusy) return;
+      delBusy = true;
+      try {
+        for (;;) {
+          const s0 = applyState(); if (!s0.del || !s0.del.on) return;
+          const list = s0.del.dids || [];
+          if (s0.del.i >= list.length) return stopDelete(null, true);
+          const v = list[s0.del.i];
+          if (s0.del.curDid !== v.id) {                            // hop to the next village (page reload)
+            const s = applyState(); s.del.curDid = v.id; setApplyState(s);
+            await sleep(Math.max(300, stepMs()));
+            location.href = '/build.php?gid=17&t=3&newdid=' + v.id;
+            return;                                                // the boot resume continues after load
+          }
+          if (!await deleteHere(v)) return;                        // stopped or failed - message already shown
+          const s2 = applyState(); if (!s2.del) return;
+          s2.del.i++; setApplyState(s2);
+        }
+      } finally { delBusy = false; }
+    }
+
     // Start one route: jump to its source village's Trade-routes tab; resumeApply() finishes after load.
     function startPrefill(rid) {
       const plan = GM_getValue(APPLY_KEY, null); if (!plan) return;
@@ -619,14 +698,25 @@
           '<span>ms, random per field</span></div>' +
         (function () {
           const left = ordered.filter(r => !done[r.id]).length;
-          const running = !!(st.auto && st.auto.on);
-          if (running) return '<div style="margin:6px 0 2px;display:flex;align-items:center;gap:7px">' +
-            '<button id="tcAutoStop" style="cursor:pointer;background:#3a1d1d;color:#f0533f;border:1px solid #f0533f;border-radius:6px;padding:4px 10px;font:inherit;font-weight:600">■ Stop</button>' +
-            '<span style="color:#f0a92b">creating routes automatically…</span></div>';
-          return '<div style="margin:6px 0 2px"><button id="tcAutoAll"' + (left ? '' : ' disabled') +
-            ' title="Fill AND submit every remaining route, one after another. This presses Create for you." ' +
-            'style="cursor:' + (left ? 'pointer' : 'not-allowed') + ';background:#1d2630;color:' + (left ? '#f5b342' : '#5d6b78') +
-            ';border:1px solid #2a3744;border-radius:6px;padding:4px 10px;font:inherit;font-weight:600">▶ Create all ' + left + ' remaining</button></div>';
+          const stopBtn = (id, label) => '<div style="margin:6px 0 2px;display:flex;align-items:center;gap:7px">' +
+            '<button id="' + id + '" style="cursor:pointer;background:#3a1d1d;color:#f0533f;border:1px solid #f0533f;border-radius:6px;padding:4px 10px;font:inherit;font-weight:600">■ Stop</button>' +
+            '<span style="color:#f0a92b">' + label + '</span></div>';
+          if (st.auto && st.auto.on) return stopBtn('tcAutoStop', 'creating routes automatically…');
+          if (st.del && st.del.on) return stopBtn('tcDelStop', 'deleting routes… (' + (st.del.removed || 0) + ' so far)');
+          const btn = (id, bg, fg, br, label, tip, off) =>
+            '<button id="' + id + '"' + (off ? ' disabled' : '') + ' title="' + tip + '" style="cursor:' + (off ? 'not-allowed' : 'pointer') +
+            ';background:' + bg + ';color:' + (off ? '#5d6b78' : fg) + ';border:1px solid ' + br + ';border-radius:6px;padding:4px 10px;font:inherit;font-weight:600">' + label + '</button>';
+          return '<div style="margin:6px 0 2px">' +
+              btn('tcAutoAll', '#1d2630', '#f5b342', '#2a3744', '▶ Create all ' + left + ' remaining',
+                  'Fill AND submit every remaining route, one after another. This presses Create for you.', !left) +
+            '</div>' +
+            '<div style="margin:4px 0 2px;display:flex;align-items:center;gap:6px;flex-wrap:wrap">' +
+              '<span style="color:#5d6b78">delete existing:</span>' +
+              btn('tcDelHere', '#241a1a', '#f0805f', '#5a2f2f', '🗑 this village',
+                  'Delete every trade route in the village you are viewing right now.') +
+              btn('tcDelAll', '#241a1a', '#f0805f', '#5a2f2f', '🗑 all villages',
+                  'Visit every village and delete every trade route it has. Cannot be undone from here.') +
+            '</div>';
         })() + rows;
       panel.querySelector('#tcApplyClose').onclick = () => { const s = applyState(); s.dismissed = plan.ts || Date.now(); setApplyState(s); panel.remove(); };
       panel.querySelector('#tcApplyReset').onclick = () => { const s = applyState(); s.done = {}; setApplyState(s); renderApplyPanel(); };
@@ -644,6 +734,26 @@
       };
       const as = panel.querySelector('#tcAutoStop');
       if (as) as.onclick = () => { const s = applyState(); s.auto = null; s.pending = null; setApplyState(s); renderApplyPanel(); toast('Stopped - nothing further will be created.', '#f0a92b'); };
+      // Deleting existing routes. Destructive and not undoable from here, so both paths confirm, and
+      // the all-villages one confirms again once it knows how many villages it would walk.
+      const dh = panel.querySelector('#tcDelHere');
+      if (dh) dh.onclick = () => {
+        if (!confirm('Delete EVERY trade route in the village you are viewing right now?\n\nThis cannot be undone from here. Pull & Sync first if you want a record of them.')) return;
+        const s = applyState(); s.del = { on: true, dids: [{ id: null, name: 'this village' }], i: 0, removed: 0, curDid: null }; setApplyState(s);
+        renderApplyPanel(); deleteLoop();
+      };
+      const da = panel.querySelector('#tcDelAll');
+      if (da) da.onclick = async () => {
+        if (!confirm('Delete EVERY trade route in ALL of your villages?\n\nThe script will visit each village and remove every route it finds.\nThis cannot be undone from here. Pull & Sync first if you want a record of them.')) return;
+        let list;
+        try { list = await villageDids(); } catch (e) { alert('Could not read your village list: ' + e.message); return; }
+        if (!list.length) { alert('No villages found.'); return; }
+        if (!confirm('Found ' + list.length + ' villages.\n\nProceed and delete every trade route in all of them?')) return;
+        const s = applyState(); s.del = { on: true, dids: list, i: 0, removed: 0, curDid: 0 }; setApplyState(s);
+        renderApplyPanel(); deleteLoop();
+      };
+      const ds = panel.querySelector('#tcDelStop');
+      if (ds) ds.onclick = () => { const s = applyState(); s.del = null; setApplyState(s); renderApplyPanel(); toast('Stopped - nothing further will be deleted.', '#f0a92b'); };
       // Drag the panel by its header. Position is stored, so it stays put across the page reloads
       // that Pre-fill triggers; double-clicking the header forgets it and snaps back to the corner.
       const head = panel.querySelector('#tcApplyHead');
@@ -689,7 +799,11 @@
       renderApplyPanel();
       const hadPending = !!applyState().pending;
       await resumeApply();                                   // a pending step also continues the batch itself
-      if (!hadPending) { const s = applyState(); if (s.auto && s.auto.on) autoLoop(); }  // resume a batch cut short by a manual reload
+      if (!hadPending) {                                   // resume a run cut short by a reload / village hop
+        const s = applyState();
+        if (s.auto && s.auto.on) autoLoop();
+        else if (s.del && s.del.on) deleteLoop();
+      }
     });
     // a fresh plan pushed from the tool: reset progress and show the panel
     try { GM_addValueChangeListener(APPLY_KEY, (n, o, nv) => { const k = applyState(); setApplyState({ ts: (nv && nv.ts) || Date.now(), done: {}, pending: null, dismissed: 0, stepMin: k.stepMin, stepMax: k.stepMax, panelPos: k.panelPos }); renderApplyPanel(); }); } catch (e) {}

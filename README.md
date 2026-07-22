@@ -41,10 +41,12 @@ Two ways to work through the list:
 - **Pre-fill ▸** (per route) — jumps to the source village's marketplace, opens *Create trade route*, fills in destination, resources, interval and a whole-hour send time, then highlights **Create trade route** for you to check and click. Nothing is created until you click.
 - **▶ Create all N remaining** — works down the whole list automatically, **pressing Create itself** for every route. It asks for confirmation first, shows a **Stop** button throughout, verifies each route was actually accepted before moving on, and halts on the first one the game refuses rather than continuing blindly.
 
+To start from a clean slate there are also **🗑 this village** and **🗑 all villages**, which drive the game's own delete flow (tick the route's group checkbox → *Edit selected* → the trash button). The all-villages version walks every village you own. Both confirm first and can be stopped mid-run. **Deleting cannot be undone from here** — run **Pull & Sync** beforehand if you want a record of the routes you're removing.
+
 Works with the **Chrome extension** (see `extension/` — plan travels dashboard → `chrome.storage.local` → the game's content script) or the legacy Tampermonkey userscript. Only villages synced from the game (which carry an in-game id) can be applied; harbor/ship routes pre-fill resources but may need the trade-ship option set by hand. Needs Gold Club (recurring routes are a Gold Club feature).
 
 After changing `travian-tool.html` or `travian-commander-sync.user.js`, re-run `python extension/build.py` and reload the extension.
 
 ## Notes / disclaimer
 
-Pulling data is read-only. **Apply in game** is not: **Pre-fill ▸** only populates the form and leaves the **Create** click to you, but **▶ Create all** submits the routes itself — that is genuine automated game action. Using scripts to assist play, and automated actions in particular, can violate Travian's Terms of Service and put the account at risk. The automatic mode is opt-in, asks for confirmation, and can be stopped mid-run — but the choice, and the consequences, are yours.
+Pulling data is read-only. **Apply in game** is not: **Pre-fill ▸** only populates the form and leaves the **Create** click to you, but **▶ Create all** submits the routes itself, and the **🗑 delete** buttons remove existing routes — both are genuine automated game actions, and deletion is destructive with no undo in the tool. Using scripts to assist play, and automated actions in particular, can violate Travian's Terms of Service and put the account at risk. Every automatic mode is opt-in, confirms first, and can be stopped mid-run — but the choice, and the consequences, are yours.
