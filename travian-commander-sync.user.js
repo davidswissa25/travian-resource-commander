@@ -434,6 +434,21 @@
       if (d.ok && netSeen[d.method] !== undefined) netSeen[d.method] = Date.now();
     });
     const confirmedByGame = (method, since, ms) => waitEl(() => netSeen[method] > since ? true : null, ms || 9000).then(() => true, () => false);
+    // Does the village on screen already send to `toName`? Travian merges by destination: creating a
+    // second route to the same village does NOT make a separate one, it stacks another schedule onto
+    // the existing route. So ANY match matters - matching only "identical" amounts/interval would let
+    // the damaging case through, which is exactly how routes end up sending several times over.
+    function existingRouteTo(toName) {
+      const want = String(toName || '').replace(/\s+/g, ' ').trim().toLowerCase();
+      if (!want) return false;
+      return [...document.querySelectorAll('*')].some(e => {
+        if (e.children.length > 3) return false;
+        const t = (e.textContent || '').trim();
+        if (!/^To:\s/.test(t)) return false;
+        const name = t.split('\n')[0].replace(/^To:\s*/, '').replace(/Travel.*/i, '').replace(/\s+/g, ' ').trim().toLowerCase();
+        return name === want;
+      });
+    }
     const dismissDialog = () => { const c = [...document.querySelectorAll('button')].find(b => /^\s*Cancel\s*$/i.test(b.textContent || '')); if (c) { c.click(); return true; } return false; };
     // Panel order == batch order, so "create all" works down the list exactly as displayed.
     const collate = (a, b) => String(a || '').localeCompare(String(b || ''), undefined, { numeric: true, sensitivity: 'base' });
@@ -515,7 +530,8 @@
       const shipNote = (r && r.shipMissing) ? ' NOTE: planned for trade ships, but ' + route.fromName + ' offers no "Use trade ships" option - it will go by merchants.' : '';
       // during an automatic batch the "click Create" prompt would be wrong - createOne reports instead
       if ((applyState().auto || {}).on) { if (shipNote) toast(route.fromName + ' → ' + route.toName + ':' + shipNote, '#f0a92b'); }
-      else toast('Pre-filled ' + route.fromName + ' → ' + route.toName + '. Review it and click "Create trade route".' + shipNote, '#f5b342');
+      else toast('Pre-filled ' + route.fromName + ' → ' + route.toName + '. Review it and click "Create trade route".' + shipNote
+        + (existingRouteTo(route.toName) ? ' WARNING: this village already sends to ' + route.toName + ' - creating this stacks a second schedule onto that route rather than making a new one.' : ''), '#f5b342');
     }
 
     /* ----- automatic batch: fill AND submit every route that isn't done yet -----
@@ -532,6 +548,19 @@
     }
     // Fill the dialog for one route, press Create, and confirm the form actually closed.
     async function createOne(route) {
+      // Never create a second route to a destination this village already serves - it would stack a
+      // schedule onto the existing one rather than show up as a duplicate. Skipping instead of failing
+      // makes "Create all" safe to re-run, and safe after a reset or a halted run.
+      if (existingRouteTo(route.toName)) {
+        const s0 = applyState();
+        (s0.done = s0.done || {})[route.id] = true;
+        (s0.skipped = s0.skipped || {})[route.id] = true;
+        setApplyState(s0);
+        toast('= ' + route.fromName + ' → ' + route.toName + ' already exists - skipped', '#8b9aa8');
+        renderApplyPanel();
+        await pause();
+        return true;
+      }
       const rowsBefore = listRowCount();                        // measured with no dialog covering the list
       try { await prefillHere(route); }
       catch (e) { return stopAuto('could not fill ' + route.fromName + ' → ' + route.toName + ' (' + e.message + ')'); }
@@ -711,6 +740,7 @@
       // village, so keeping its routes together means fewer village switches while working down the list.
       const ordered = orderRoutes(plan.routes);
       let lastFrom = null;
+      const skipped = st.skipped || {};
       const rows = ordered.map(r => {
         const dn = !!done[r.id];
         const res = [['\u{1FAB5}', r.res.lumber], ['\u{1F9F1}', r.res.clay], ['⛏', r.res.iron], ['\u{1F33E}', r.res.crop]].filter(x => x[1] > 0).map(x => x[0] + nfmt(x[1])).join(' ');
@@ -723,7 +753,9 @@
         }
         return head + '<div style="display:flex;gap:6px;align-items:center;padding:4px 0 4px 8px;' + (dn ? 'opacity:.45' : '') + '">' +
           '<div style="flex:1;min-width:0">→ <b>' + escH(r.toName) + '</b><br><span style="color:#8b9aa8">' + res + ' · every ' + snapIv(r.interval) + 'h' + (r.useShips ? ' · ⛵' : '') + '</span></div>' +
-          (dn ? '<span style="color:#3fb950;font-size:15px" title="marked done">✓</span>'
+          (dn ? (skipped[r.id]
+                ? '<span style="color:#8b9aa8" title="this village already had a route to that destination, so it was left alone">= exists</span>'
+                : '<span style="color:#3fb950;font-size:15px" title="created by the panel">✓</span>')
               : '<button data-rid="' + escH(r.id) + '" class="tcPre" style="cursor:pointer;background:#1d2630;color:#f5b342;border:1px solid #2a3744;border-radius:6px;padding:4px 8px;font:inherit;white-space:nowrap">Pre-fill ▸</button>' +
                 '<button data-rid="' + escH(r.id) + '" class="tcDone" title="mark as created / skip" style="cursor:pointer;background:transparent;color:#8b9aa8;border:1px solid #2a3744;border-radius:6px;padding:4px 7px;font:inherit">✓</button>') +
           '</div>';
@@ -759,7 +791,7 @@
             '</div>';
         })() + rows;
       panel.querySelector('#tcApplyClose').onclick = () => { const s = applyState(); s.dismissed = plan.ts || Date.now(); setApplyState(s); panel.remove(); };
-      panel.querySelector('#tcApplyReset').onclick = () => { const s = applyState(); s.done = {}; setApplyState(s); renderApplyPanel(); };
+      panel.querySelector('#tcApplyReset').onclick = () => { const s = applyState(); s.done = {}; s.skipped = {}; setApplyState(s); renderApplyPanel(); };
       // Start / stop the automatic batch. Starting is behind a confirm because, unlike Pre-fill, this
       // presses Create itself - every remaining route really will be created in game.
       const aa = panel.querySelector('#tcAutoAll');
