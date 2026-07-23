@@ -357,7 +357,9 @@ function celebrationNeedsPerHour(v){
 function keepReserve(v){
   // "Ignore celebrations" -> don't hold back any resources for the 24/7 celebration reserve.
   const c=state.ignoreCeleb?{lumber:0,clay:0,iron:0,crop:0}:celebrationNeedsPerHour(v), b=v.stillBuilding?(optMargin||0):0;
-  return {lumber:(c.lumber||0)+b, clay:(c.clay||0)+b, iron:(c.iron||0)+b, crop:b};
+  // Crop build buffer is only 40% of the L/C/I buffer: crop is the least building-hungry resource and
+  // over-reserving it just leaves granaries full, so it holds back less before donating.
+  return {lumber:(c.lumber||0)+b, clay:(c.clay||0)+b, iron:(c.iron||0)+b, crop:b*0.4};
 }
 const fmt = n => Math.round(n).toLocaleString();
 const signed = n => (n>=0?"+":"") + fmt(n);
@@ -1211,7 +1213,12 @@ function buildAutoPlan(mode){
       // The capital is the intended dump for excess crop when "send excess crop to capital" is on, so
       // let its granary fill over the horizon instead of the usual "keep crop net <= 0" cap.
       const capCollect = k==='crop' && v.capital && state.cropToCapital;
-      const allowed = (k==='crop' && !capCollect) ? Math.max(0,-base)*(v.troopVillage?1+((state.troopCropExtra==null?5:state.troopCropExtra)/100):1) : (cap>0 ? Math.max(0, (cap-cur)/hz - base) : totalIn);
+      // The capital is the accepted dump for centralized excess crop: let it receive everything the
+      // sweep sends, even past its own granary room (better to pile up in one place than waste it in
+      // scattered full granaries). Overflow at the capital is warned about separately, not throttled here.
+      const allowed = capCollect ? totalIn
+        : (k==='crop') ? Math.max(0,-base)*(v.troopVillage?1+((state.troopCropExtra==null?5:state.troopCropExtra)/100):1)
+        : (cap>0 ? Math.max(0, (cap-cur)/hz - base) : totalIn);
       if(totalIn>allowed+0.5){ const scale=allowed/totalIn; inn.forEach(r=>r.flow[k]*=scale); }
     });
   });
@@ -1256,6 +1263,8 @@ function buildAutoPlan(mode){
     ? `<p class="note">&#9888; Crop still uncovered: ${cropPlan.unmet.map(u=>esc(u.name)+" ("+fmt(u.need)+"/h short)").join(", ")}.</p>` : "";
   if(overflowPlan.urgent && overflowPlan.urgent.length)
     unmetNote += `<p class="note">&#9888; Warehouse still filling within ${WAREHOUSE_FILL_H}h (out of carriers or troop-village room): ${overflowPlan.urgent.join(", ")}. Raise Marketplace levels/trade ships or add another troop village.</p>`;
+  if(cropCollectPlan.capOverflow)
+    unmetNote += `<p class="note">&#9888; Centralized crop is piling up faster than <b>${esc(cropCollectPlan.capName)}</b> (capital) can hold &mdash; its granary will overflow within ${OVERFLOW_HORIZON}h. Build/upgrade the capital granary, run a celebration there, or lower crop production.</p>`;
   if(carrierLimited.length)
     unmetNote += `<p class="note">&#9650; Carrier-limited &mdash; these villages still hold surplus they <b>can&rsquo;t move</b> (no free merchants/ships left, so not all their resources are used): ${carrierLimited.map(c=>`<b>${esc(c.name)}</b> (${RES.filter(k=>c.res[k]>=1).map(k=>`<span style="color:var(--${k})">${fmt(c.res[k])} ${k}</span>`).join(' &middot; ')}/h)`).join("; ")}. Raise their Marketplace level or add trade ships to move it.</p>`;
   return {routes, summary, unmetNote, cropPlan, carrierLimited};
@@ -1637,19 +1646,26 @@ function optimizeCropCollect(cropPlan, troopPlan, overflowPlan){
   const carr={}; state.villages.forEach(v=>{ const c=committed[v.id]||{merchants:0,ships:0};
     carr[v.id]={merch:Math.max(0,maxMerchants(v)-c.merchants-used[v.id].m), ship:Math.max(0,maxShips(v)-c.ships-used[v.id].s)}; });
   const wrap=id=>({v:state.villages.find(x=>x.id===id),merchAvail:carr[id].merch,shipAvail:carr[id].ship});
-  const routes=[]; let capRoom=((capV.granary&&capV.granary.capacity)||0)-((capV.granary&&capV.granary.crop)||0);
+  const routes=[]; let swept=0;
+  const capRoom=Math.max(0,((capV.granary&&capV.granary.capacity)||0)-((capV.granary&&capV.granary.crop)||0));
   const collectors=ids.map(id=>state.villages.find(v=>v.id===id)).filter(Boolean).sort((a,b)=>dist(a,capV)-dist(b,capV));
   for(const D of collectors){
     if(carr[D.id].merch+carr[D.id].ship<=0) continue;
     const dst=dist(D,capV);
-    const a=bestAlloc(wrap(D.id),dst,{v:capV,crop:(capV.granary&&capV.granary.crop)||0,need:1e-6,capRoom:Math.max(1,capRoom)},leftover[D.id]);
+    // Ship all this village's leftover crop to the capital, bounded only by carriers - NOT by the
+    // capital's granary room (capRoom:1e12), so a nearly-full capital doesn't leave donors overflowing.
+    const a=bestAlloc(wrap(D.id),dst,{v:capV,crop:(capV.granary&&capV.granary.crop)||0,need:1e-6,capRoom:1e12},leftover[D.id]);
     if(a.F<1) continue;
     carr[D.id].merch=Math.max(0,carr[D.id].merch-a.mUsed); carr[D.id].ship=Math.max(0,carr[D.id].ship-a.sUsed);
     routes.push({from:D.id,to:capV.id,fromName:D.name,toName:capV.name,cropPerHour:a.F,perSend:Math.round(a.F*a.I),
       interval:a.I,distance:Math.round(dst),merchants:a.mUsed,ships:a.sUsed,roundTrip:a.roundTrip,merchCapped:a.capped,relay:null,impact:"surplus &rarr; capital"});
-    capRoom-=a.F*a.I;
+    swept+=a.F;
   }
-  return {routes};
+  // Warn if the capital granary will fill from the swept crop faster than the overflow horizon (its
+  // own crop net plus everything arriving) - the excess crop lands here but the capital can't hold it.
+  const capNet=Math.max(0,prodBase(capV,'crop')-consumption(capV));
+  const capOverflow = swept>0.5 && capRoom>0 && (swept+capNet)*OVERFLOW_HORIZON > capRoom;
+  return {routes, capName:capV.name, capOverflow, swept:Math.round(swept)};
 }
 function applyPlan(){
   const plan=optimize();
