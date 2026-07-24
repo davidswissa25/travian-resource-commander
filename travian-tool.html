@@ -1212,6 +1212,18 @@ function buildAutoPlanV2Core(mode,opts){
     unmetNote=`<p class="note">&#9888; <b>[v2]</b> unmet: ${Object.keys(byV).sort().map(n=>`<b>${esc(n)}</b>: ${byV[n].join(', ')}`).join('; ')}.</p>`; }
   if(carrierLimited.length)
     unmetNote+=`<p class="note">&#9650; Carrier-limited &mdash; surplus stuck at home (no free merchants/ships): ${carrierLimited.map(c=>`<b>${esc(c.name)}</b> (${RES.filter(k=>c.res[k]>=1).map(k=>`<span style="color:var(--${k})">${fmt(c.res[k])} ${k}</span>`).join(' &middot; ')}/h)`).join('; ')}.</p>`;
+  // NPC-merchant hint (S5): crop the plan can't move - stuck for lack of carriers, or overflowing the
+  // granary. The NPC merchant (3 Gold) rebalances a village's OWN stores into any ratio, so converting
+  // that dead crop into lumber/clay/iron locally avoids the loss and feeds construction.
+  const npcRate={}, npcOver=new Set();
+  carrierLimited.forEach(c=>{ const cr=c.res.crop||0, other=(c.res.lumber||0)+(c.res.clay||0)+(c.res.iron||0);
+    if(cr>=Math.max(1,optMinRoute) && cr>=other) npcRate[c.name]=Math.round(cr); });
+  ((sim&&sim.issues)||[]).forEach(is=>{ if(is.type==='overflow'&&is.k==='crop'){ const m=M.byId[is.vid]; if(m&&!npcRate[m.name]) npcOver.add(m.name); } });
+  if(Object.keys(npcRate).length || npcOver.size){
+    const a=Object.keys(npcRate).sort().map(n=>`<b>${esc(n)}</b> (${fmt(npcRate[n])} crop/h)`);
+    const b=[...npcOver].sort().map(n=>`<b>${esc(n)}</b> (granary overflowing)`);
+    unmetNote+=`<p class="note">&#128161; <b>NPC merchant</b> &mdash; crop no carrier can move: ${a.concat(b).join('; ')}. Trade it into lumber/clay/iron locally (3 Gold) &mdash; no granary loss, and it feeds construction.</p>`;
+  }
   unmetNote+=abNote;
   return {routes:kept, summary, unmetNote, cropPlan:null, carrierLimited, sim, hardUnmet, topo:V2TOPO||curTopo(), moved};
 }
