@@ -1725,28 +1725,8 @@ function optimizeCropCollect(cropPlan, troopPlan, overflowPlan){
   }
   return {routes};
 }
-function applyPlan(){
-  const plan=optimize();
-  plan.routes.forEach(r=>state.routes.push({id:uid(),from:r.from,to:r.to,
-    resources:{lumber:0,clay:0,iron:0,crop:r.perSend},
-    intervalHours:r.interval,merchants:r.merchants,ships:r.ships||0,offsetHours:r.offsetHours||0,auto:true}));
-  save(); setTab("routes");
-}
-// All-in-one: crop balance + troop supply + overflow, computed in the order they share the
-// carrier pool (each later plan sees the earlier plans' carrier reservations), applied at once.
-function applyAll(){
-  const cropPlan=optimize();
-  const troopPlan=optimizeTroopSupply(cropPlan);
-  const overflowPlan=optimizeOverflow(cropPlan,troopPlan);
-  const add=(r,res)=>state.routes.push({id:uid(),from:r.from,to:r.to,resources:res,
-    intervalHours:r.interval,merchants:r.merchants,ships:r.ships||0,offsetHours:r.offsetHours||0,auto:true});
-  cropPlan.routes.forEach(r=>add(r,{lumber:0,clay:0,iron:0,crop:r.perSend}));
-  troopPlan.routes.forEach(r=>add(r,r.resources));
-  overflowPlan.routes.forEach(r=>add(r,r.resources));
-  const n=cropPlan.routes.length+troopPlan.routes.length+overflowPlan.routes.length;
-  save(); setTab("routes");
-  if(!n) alert("Nothing to apply — no crop, troop-supply or overflow routes were proposed.");
-}
+// (removed dead applyPlan/applyAll — the old per-plan apply wrappers, superseded by the unified
+//  diff-apply applyAutoPlan. optimize/optimizeTroopSupply/optimizeOverflow remain the v1 engine.)
 
 // Pre-fill marketplace send URL for all four resources (used by troop supply routes).
 function sendLinkRes(fromV,toV,res){
