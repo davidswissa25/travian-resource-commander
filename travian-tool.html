@@ -493,10 +493,11 @@ function consumption(v){ return (v.baseConsumption||0)+troopUpkeep(v)+(state.ign
 // A village is a "supply target" (must be kept fed with lumber/clay/iron) if it makes troops OR carries
 // a manual custom requirement of any of those - so non-troop villages with a fixed demand get supplied too.
 function hasSupplyNeed(v){ if(v&&v.troopVillage) return true; const c=v&&v.customNeed; return !!c && (Math.max(0,c.lumber||0)+Math.max(0,c.clay||0)+Math.max(0,c.iron||0))>0.5; }
-function routeFlows(){
+function routeFlows(routes){
+  const src=routes||state.routes;
   const byId={}; state.villages.forEach(v=>byId[v.id]=v);
   // Nominal hourly flow each route requests.
-  const rts=state.routes.map(r=>{ const iv=r.intervalHours>0?r.intervalHours:1; const ph={};
+  const rts=src.map(r=>{ const iv=r.intervalHours>0?r.intervalHours:1; const ph={};
     RES.forEach(k=>ph[k]=(r.resources&&r.resources[k]||0)/iv); return {from:r.from,to:r.to,d:{...ph}}; });
   // A route can't deliver more of a resource than its source actually SUSTAINS: own production surplus
   // (minus its crop upkeep) plus what it genuinely receives. Scale each source's outgoing down to that,
@@ -637,9 +638,9 @@ function maxMerchants(v){ const lvl=(v.marketplaceLevel||state.defaultMarket||0)
 // Carriers (merchants + ships) already tied up by existing routes. A route sending
 // every I h with a round-trip of T h keeps ceil(T/I) carriers in flight continuously
 // ("waves"), so during normal operation that many are unavailable for new routes.
-function committedCarriers(){
+function committedCarriers(routes){
   const m={};
-  state.routes.forEach(r=>{
+  (routes||state.routes).forEach(r=>{
     const from=state.villages.find(v=>v.id===r.from), to=state.villages.find(v=>v.id===r.to);
     if(!from||!to) return;
     let merch=r.merchants, ships=r.ships||0;
@@ -653,11 +654,13 @@ function committedCarriers(){
   });
   return m;
 }
-// The optimizer plans "from scratch" by default: it ignores existing routes (empty flows and
-// no tied-up carriers) so it proposes a complete route set, not increments on top of what you
-// already run. Turn From-scratch off to plan only the gap left by current routes.
-function planFlows(){ return optFromScratch ? {inn:{},out:{}} : routeFlows(); }
-function planCommitted(){ return optFromScratch ? {} : committedCarriers(); }
+// From-scratch ON: ignore every existing route (empty flows, no tied-up carriers) and plan a complete
+// fresh set. From-scratch OFF: keep your MANUAL and in-game-SYNCED routes as fixed (plan around them,
+// reserving their carriers) but re-optimize the AUTO layer from zero - so the plan can edit and delete
+// its own previous auto routes, not just stack new ones on top. Either way, apply is a diff.
+function nonAutoRoutes(){ return state.routes.filter(r=>!r.auto); }
+function planFlows(){ return optFromScratch ? {inn:{},out:{}} : routeFlows(nonAutoRoutes()); }
+function planCommitted(){ return optFromScratch ? {} : committedCarriers(nonAutoRoutes()); }
 function detectSpeed(s){ const m=String(s||"").match(/(?:^|[\s.\-\/])x(\d+)(?:[\s.\-]|$)/i); return m?+m[1]:null; }
 function detectServerSpeed(s){ const v=detectSpeed(s); if(v){ state.serverSpeed=v; save(); } return v; }
 // Carrier fleets available to a donor at distance d, richest-per-carrier first.
@@ -1471,9 +1474,10 @@ function computeApplyDiff(plan){
     if(!ex) adds.push(r);
     else if(routeDrift(ex,r)) updates.push({ex,r}); else keeps.push(ex);
   });
-  // Only from-scratch plans are complete, so only they may retire auto routes the plan dropped.
-  // A gap plan is a delta on top of what already runs, so it never deletes.
-  const deletes = optFromScratch ? existingAuto.filter(r=>!seen[routeKey(r.from,r.to,r.ships)]) : [];
+  // Both modes now produce a complete AUTO layer (from-scratch ignores everything; gap re-optimizes the
+  // auto layer around fixed manual/synced routes), so an existing auto route the plan no longer contains
+  // is genuinely redundant and can be retired. Manual/synced routes are never in existingAuto, so safe.
+  const deletes = existingAuto.filter(r=>!seen[routeKey(r.from,r.to,r.ships)]);
   return {adds,updates,keeps,deletes};
 }
 function applyAutoPlan(){
@@ -1567,7 +1571,7 @@ function renderOptimizer(){
         </select></label>
       <label title="After every crop requirement is met, sweep each village's LEFTOVER crop surplus to the Capital (bounded by the Capital's granary room) so your overflow piles up in one place - easier to NPC or manage than scattered across villages. Works with any crop policy; already implied by Capital centralize. Needs a Capital marked. (v2 engine.)"><input type="checkbox" ${state.cropExcessToCapital?'checked':''} ${state.optTopo==='centralize'?'disabled':''} onchange="state.cropExcessToCapital=this.checked;save();renderAll()"> Excess crop &rarr; Capital</label>
       <span class="note" style="margin:0" title="A Trainer artifact is detected from the Treasury on Pull & Sync and normalizes each village's training time. Per troop village you can override it (plan with/without the trainer) in that village's Edit form.">Trainer artifact: detected from Treasury &middot; per-village override in Edit</span>
-      <label title="Plan a complete route set ignoring your existing routes (Save replaces the optimizer's previous routes). Uncheck to plan only the gap on top of what you already run."><input type="checkbox" ${optFromScratch?'checked':''} onchange="optFromScratch=this.checked;state.optFromScratch=optFromScratch;save();renderOptimizer()"> From scratch</label>
+      <label title="ON: plan a complete fresh set, ignoring every existing route. OFF: keep your manual and in-game-synced routes fixed (plan around them) but re-optimize the auto routes - so the plan can add, edit AND delete its own previous auto routes to match the current optimum, not just stack new ones on top. Apply is always a reviewed diff; manual and synced routes are never touched."><input type="checkbox" ${optFromScratch?'checked':''} onchange="optFromScratch=this.checked;state.optFromScratch=optFromScratch;save();renderOptimizer()"> From scratch</label>
       <label>Server URL: <input type="text" value="${esc(state.serverUrl||'')}" placeholder="https://rof.x2.europe.travian.com" style="width:220px" onchange="state.serverUrl=this.value.trim().replace(/\/+$/,'');detectServerSpeed(state.serverUrl);renderAll()"></label>
       <div class="grow"></div>
       <button class="primary" onclick="renderOptimizer()" title="Re-run the optimizer now with the settings above">&#8635; Generate routes</button>
