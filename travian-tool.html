@@ -499,6 +499,11 @@ function routeFlows(routes){
   // Nominal hourly flow each route requests.
   const rts=src.map(r=>{ const iv=r.intervalHours>0?r.intervalHours:1; const ph={};
     RES.forEach(k=>ph[k]=(r.resources&&r.resources[k]||0)/iv); return {from:r.from,to:r.to,d:{...ph}}; });
+  // Nominal outgoing per village BEFORE the sustainability scaling below - i.e. what the routes are
+  // actually SET to send. The scaled `out` caps this at what the village can support (so net never
+  // lies), but the analysis needs the raw figure to warn when a village is over-committed.
+  const outNom={}; state.villages.forEach(v=>outNom[v.id]={lumber:0,clay:0,iron:0,crop:0});
+  rts.forEach(r=>RES.forEach(k=>{ if(outNom[r.from]) outNom[r.from][k]+=r.d[k]; }));
   // A route can't deliver more of a resource than its source actually SUSTAINS: own production surplus
   // (minus its crop upkeep) plus what it genuinely receives. Scale each source's outgoing down to that,
   // and repeat so a relay that loses inflow also loses what it can forward (converges in a few passes).
@@ -521,7 +526,7 @@ function routeFlows(routes){
   const inn={}, out={};
   state.villages.forEach(v=>{ inn[v.id]={lumber:0,clay:0,iron:0,crop:0}; out[v.id]={lumber:0,clay:0,iron:0,crop:0}; });
   rts.forEach(r=>RES.forEach(k=>{ if(out[r.from]) out[r.from][k]+=r.d[k]; if(inn[r.to]) inn[r.to][k]+=r.d[k]; }));
-  return {inn,out};
+  return {inn,out,outNom};
 }
 function netRates(v, flows){
   const inn=flows.inn[v.id]||{}, out=flows.out[v.id]||{}, n={};
@@ -2175,24 +2180,30 @@ function applyOverflowPlan(){
 // but reports every resource and classifies each as draining (will empty) or
 // overflowing (will hit capacity and waste). ETAs assume the current net rate holds.
 function balanceRow(v,flows){
-  const inn=flows.inn[v.id]||{}, out=flows.out[v.id]||{};
-  const p=projected(v,flows), cells=RES.map(k=>{
+  const inn=flows.inn[v.id]||{}, outNom=(flows.outNom&&flows.outNom[v.id])||{};
+  const p=projected(v,flows), reserve=keepReserve(v);
+  const cells=RES.map(k=>{
     let base=prodBase(v,k); if(k==="crop") base-=consumption(v); // troop-training crop already excluded from consumption()
-    const net=p.net[k], cur=p.cur[k], cap=p.cap[k]||0; let tag, col="ok", eta=Infinity;
-    if(net<-0.5){ eta=cur/(-net); col=eta<6?"bad":"warn"; tag="empty in "+hms(eta); }
+    const net=p.net[k], cur=p.cur[k], cap=p.cap[k]||0;
+    const avail=base+(inn[k]||0);                                 // what this village can actually put on routes /h
+    const oversend=Math.max(0,(outNom[k]||0)-Math.max(0,avail));  // (2) routes SET to send more than that
+    const resv=reserve[k]||0;                                     // build buffer + celebration reserve it should keep /h
+    const short=resv>0.5?Math.max(0,resv-net):0;                  // (3) keeps less than its own goal after all sends
+    let tag, col="ok", eta=Infinity;
+    if(net<-0.5){ eta=cur/(-net); col=eta<6?"bad":"warn"; tag="empty in "+hms(eta); }          // (1) own deficit - never from oversending; sends are capped so net can't go minus from shipping
+    else if(oversend>0.5){ col="bad"; tag="over-sending "+fmt(oversend)+"/h"; }                 // (2) set to send more than it makes; only the EXCESS is shown
+    else if(short>0.5){ col="warn"; tag="keeps "+fmt(net)+"/h, wants "+fmt(resv); }              // (3) not leaving enough for building / celebration
     else if(net>0.5){
       if(cap>0 && cur>=cap){ col="bad"; tag="overflowing"; }
       else if(cap>0){ eta=(cap-cur)/net; if(eta<24){ col="warn"; tag="full in "+hms(eta);} else tag="filling"; }
       else tag="filling";
     }
-    // net ~ 0: a village that produces a surplus (base>0) and ships it all out reads as flat - call it
-    // "sending surplus" and show how much is leaving, vs a genuinely balanced village.
-    else if(base>0.5 && (out[k]||0)>0.5){ const sent=Math.min((out[k]||0), base+(inn[k]||0)); tag="sending surplus "+fmt(sent)+"/h"; }
+    else if(base>0.5 && (outNom[k]||0)>0.5) tag="sending "+fmt(Math.min(outNom[k]||0,Math.max(0,avail)))+"/h"; // sustainable donor
     else tag="balanced";
-    return {k,net,col,tag,eta};
+    return {k,net,col,tag,eta,oversend,short,resv};
   });
   const worst=cells.reduce((a,b)=>(b.col==="bad"?2:b.col==="warn"?1:0)>(a.col==="bad"?2:a.col==="warn"?1:0)?b:a,cells[0]);
-  return {v,cells,worst};
+  return {v,cells,worst, overcommit:cells.some(c=>c.oversend>0.5), buildShort:cells.some(c=>c.short>0.5)};
 }
 // Own tab: per-resource net across ALL villages, with active trade routes applied and
 // troop-training cost excluded (net = production - crop upkeep + route in/out).
@@ -2206,6 +2217,10 @@ function renderAnalysis(){
   rows.forEach(r=>r.cells.forEach(c=>tot[c.k]+=c.net));
   const deficits=rows.filter(r=>r.cells.some(c=>c.net<-0.5)).length;
   const overflows=rows.filter(r=>r.cells.some(c=>c.tag.indexOf("full")===0||c.tag==="overflowing")).length;
+  const overCommit=rows.filter(r=>r.overcommit), buildShort=rows.filter(r=>r.buildShort);
+  const warnHtml=
+    (overCommit.length?`<p class="note" style="margin:2px 0;color:var(--bad)">&#9888; <b>Sending more than they produce</b> &mdash; the routes leaving these villages are set above what they make + receive, so the excess never actually ships (net is capped, not negative): ${overCommit.map(r=>`<b>${esc(r.v.name)}</b> (${r.cells.filter(c=>c.oversend>0.5).map(c=>`<span style="color:var(--${c.k})">${fmt(c.oversend*per)} ${c.k}</span>`).join(' &middot; ')}${unit} over)`).join('; ')}. Trim those routes so the plan matches reality.</p>`:'')+
+    (buildShort.length?`<p class="note" style="margin:2px 0;color:var(--warn)">&#9888; <b>Not meeting build / celebration goal</b> &mdash; shipping away resources they should keep: ${buildShort.map(r=>`<b>${esc(r.v.name)}</b> (${r.cells.filter(c=>c.short>0.5).map(c=>`<span style="color:var(--${c.k})">keeps ${fmt(c.net*per)} of ${fmt(c.resv*per)} ${c.k}</span>`).join(' &middot; ')}${unit})`).join('; ')}. Reduce their outgoing routes, or lower Build buffer / turn off the reserve.</p>`:'');
   const body=rows.sort((a,b)=>Math.min(...a.cells.map(c=>c.eta))-Math.min(...b.cells.map(c=>c.eta))).map(r=>{
     const tds=r.cells.map(c=>`<td class="num" style="color:var(--${c.col})">${signed(c.net*per)}<div class="sub" style="font-size:11px;opacity:.85">${c.tag}</div></td>`).join("");
     const badge=r.v.troopVillage?'<span class="troop-badge">&#9876;</span>':'';
@@ -2240,9 +2255,10 @@ function renderAnalysis(){
   el.innerHTML=`
     <div style="display:flex;gap:18px;align-items:baseline;margin-bottom:10px">
       <b>Villages analysis</b>
-      <span class="note" style="margin:0">Net per resource across all villages &mdash; with active trade routes applied, troop-training cost excluded. ${deficits} draining &middot; ${overflows} nearing overflow.</span>
+      <span class="note" style="margin:0">Each village's net gain / depletion per resource <b>after all trade routes</b> (troop-training cost excluded). ${deficits} draining &middot; ${overflows} nearing overflow${overCommit.length?` &middot; <span style="color:var(--bad)">${overCommit.length} over-sending</span>`:''}${buildShort.length?` &middot; <span style="color:var(--warn)">${buildShort.length} short on build/celebration</span>`:''}.</span>
       <span style="margin-left:auto;display:inline-flex;gap:4px;align-items:center"><span class="note" style="margin:0">Show rate:</span>${btn(1,"per 1h")}${btn(24,"per 24h")}</span>
     </div>
+    ${warnHtml}
     ${troopHtml}
     <table style="margin-bottom:20px"><thead><tr><th>Account total ${unit}</th><th class="num">Lumber</th><th class="num">Clay</th><th class="num">Iron</th><th class="num">Crop</th></tr></thead>
     <tbody><tr style="font-weight:650"><td>All villages</td>${totCell('lumber')}${totCell('clay')}${totCell('iron')}${totCell('crop')}</tr></tbody></table>
