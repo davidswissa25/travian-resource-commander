@@ -1317,21 +1317,61 @@ function renderUnified(plan){
     <p class="note">Each row is one trade route carrying all four resources at once. Interval = round-trip so carriers recycle; inflows are capped so no granary/warehouse overfills within ${OVERFILL_HORIZON}h. Carriers combine the crop, troop and overflow needs (upper bound when merged).</p>`;
   return html;
 }
+// --- Diff-apply (S4/P5): reconcile the plan against tracked auto routes by stable identity
+// (from>to>carrier-kind) so unchanged routes keep their id, only real changes are written, and
+// manual / in-game-synced routes are never touched. Replaces the old wipe-and-replace.
+function routeKey(from,to,ships){ return from+">"+to+">"+((ships||0)>0?"ship":"merchant"); }
+function planRes(r){ return {lumber:r.resources.lumber||0,clay:r.resources.clay||0,iron:r.resources.iron||0,crop:r.resources.crop||0}; }
+function routeDrift(ex,r){ // true if the existing auto route differs from the planned one beyond tolerance
+  const res=planRes(r);
+  for(const k of RES){ const x=(ex.resources&&ex.resources[k])||0, y=res[k]||0;
+    if(Math.abs(x-y)/Math.max(x,y,1) > 0.05) return true; }       // >5% per-resource drift
+  if((ex.intervalHours||0)!==(r.interval||0)) return true;
+  if((ex.merchants||0)!==(r.merchants||0) || (ex.ships||0)!==(r.ships||0)) return true;
+  if(Math.abs((ex.offsetHours||0)-(r.offsetHours||0))>0.01) return true;
+  return false;
+}
+function computeApplyDiff(plan){
+  const existingAuto=state.routes.filter(r=>r.auto);
+  const byKey={}; existingAuto.forEach(r=>{ byKey[routeKey(r.from,r.to,r.ships)]=r; });
+  const seen={}, adds=[], updates=[], keeps=[];
+  plan.routes.forEach(r=>{ const k=routeKey(r.from,r.to,r.ships); seen[k]=true;
+    const ex=byKey[k];
+    if(!ex) adds.push(r);
+    else if(routeDrift(ex,r)) updates.push({ex,r}); else keeps.push(ex);
+  });
+  // Only from-scratch plans are complete, so only they may retire auto routes the plan dropped.
+  // A gap plan is a delta on top of what already runs, so it never deletes.
+  const deletes = optFromScratch ? existingAuto.filter(r=>!seen[routeKey(r.from,r.to,r.ships)]) : [];
+  return {adds,updates,keeps,deletes};
+}
 function applyAutoPlan(){
   const plan=buildAutoPlan(optMode);
-  // From-scratch plans are complete, so replace the optimizer's previous output (auto routes)
-  // instead of stacking on top. Manual and in-game-synced routes are left untouched.
-  if(optFromScratch) state.routes=state.routes.filter(r=>!r.auto);
-  plan.routes.forEach(r=>state.routes.push({id:uid(),from:r.from,to:r.to,
-    resources:{lumber:r.resources.lumber||0,clay:r.resources.clay||0,iron:r.resources.iron||0,crop:r.resources.crop||0},
+  const d=computeApplyDiff(plan);
+  if(!d.adds.length && !d.updates.length && !d.deletes.length){
+    alert(plan.routes.length ? "Nothing to apply — the tracked routes already match this plan." : "Nothing to apply — no routes were proposed.");
+    return;
+  }
+  const nm=id=>{ const v=state.villages.find(x=>x.id===id); return v?v.name:id; };
+  const lines=[];
+  d.adds.forEach(r=>lines.push("+ "+nm(r.from)+" → "+nm(r.to)));
+  d.updates.forEach(({r})=>lines.push("~ "+nm(r.from)+" → "+nm(r.to)));
+  d.deletes.forEach(r=>lines.push("− "+nm(r.from)+" → "+nm(r.to)));
+  const head=`Apply changeset to tracked routes:\n  ${d.adds.length} added · ${d.updates.length} updated · ${d.deletes.length} removed · ${d.keeps.length} unchanged\n\n`;
+  const shown=lines.slice(0,20).join("\n")+(lines.length>20?`\n… +${lines.length-20} more`:"");
+  if(!confirm(head+shown)) return;
+  d.deletes.forEach(r=>{ const i=state.routes.indexOf(r); if(i>=0) state.routes.splice(i,1); });
+  d.updates.forEach(({ex,r})=>{ ex.resources=planRes(r); ex.intervalHours=r.interval; ex.merchants=r.merchants; ex.ships=r.ships||0; ex.offsetHours=r.offsetHours||0; ex.auto=true; });
+  d.adds.forEach(r=>state.routes.push({id:uid(),from:r.from,to:r.to,resources:planRes(r),
     intervalHours:r.interval,merchants:r.merchants,ships:r.ships||0,offsetHours:r.offsetHours||0,auto:true}));
   save(); setTab("routes");
-  if(!plan.routes.length) alert("Nothing to apply — no routes were proposed.");
 }
 function renderOptimizer(){
   const el=document.getElementById("tab-optimizer");
   if(state.villages.length<2){ el.innerHTML=`<div class="empty"><h3>Need at least 2 villages</h3><p>The optimizer moves surplus crop to villages that are draining.</p></div>`; return; }
   const plan=buildAutoPlan(optMode);
+  const diff=computeApplyDiff(plan);
+  const nChg=diff.adds.length+diff.updates.length+diff.deletes.length;
   const bs=boostSummary();
   el.innerHTML=`
     <div class="opt-controls">
@@ -1361,7 +1401,7 @@ function renderOptimizer(){
       <label>Server URL: <input type="text" value="${esc(state.serverUrl||'')}" placeholder="https://rof.x2.europe.travian.com" style="width:220px" onchange="state.serverUrl=this.value.trim().replace(/\/+$/,'');detectServerSpeed(state.serverUrl);renderAll()"></label>
       <div class="grow"></div>
       <button class="primary" onclick="renderOptimizer()" title="Re-run the optimizer now with the settings above">&#8635; Generate routes</button>
-      <button class="ghost" onclick="applyAutoPlan()" ${plan.routes.length?'':'disabled'} title="Save these suggested routes into your tracked Trade Routes (for dashboard projections) - it does not create anything in-game, use the +Route link per row for that">Save ${plan.routes.length} route${plan.routes.length===1?'':'s'}</button>
+      <button class="ghost" onclick="applyAutoPlan()" ${nChg?'':'disabled'} title="Reconcile your tracked Trade Routes with this plan by identity (from&gt;to&gt;carrier): only changed routes are written, unchanged ones keep their id, and manual / in-game-synced routes are left alone. Preview lists the changeset before saving. Does not create anything in-game - use the +Route link per row for that.">${nChg?`Apply changes: <b>+${diff.adds.length} ~${diff.updates.length} &minus;${diff.deletes.length}</b>`:'In sync'}</button>
     </div>
     <p class="note">${plan.summary}</p>
     ${plan.routes.length ? renderUnified(plan) : `<div class="empty"><h3>&#9989; Nothing to route</h3><p>No crop deficits${optMode==='all'?', troop/celebration shortfalls or overflow':''} that a donor can cover right now.</p></div>`}
