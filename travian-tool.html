@@ -1106,6 +1106,22 @@ function v2Repair(M,routes,sim){
   });
   return changed;
 }
+// Source phasing: a source's routes leave at spread offsets so its carriers recycle without
+// colliding (original S2 behaviour).
+function v2StaggerSrc(routes){
+  const by={}; routes.forEach(r=>(by[r.from]=by[r.from]||[]).push(r));
+  Object.values(by).forEach(list=>list.forEach((r,i)=>r.offsetHours=+((r.interval*i/Math.max(1,list.length)).toFixed(3))));
+}
+// Arrival-aware phasing: for each receiver, aim its incoming deliveries at evenly-spread arrival
+// phases across the interval so a draining village gets a steady trickle instead of one lump per
+// cycle. offset = (targetArrivalPhase - one-way travel) mod interval.
+function v2StaggerArr(M,routes){
+  const by={}; routes.forEach(r=>(by[r.to]=by[r.to]||[]).push(r));
+  Object.values(by).forEach(list=>{ const n=Math.max(1,list.length);
+    list.forEach((r,i)=>{ const kind=(r.ships||0)>0&&!(r.merchants>0)?'ship':'merchant';
+      const U=M.byId[r.from], W=M.byId[r.to], tau=(U&&W)?tauH(U.v,W.v,kind):0, I=r.interval||1;
+      r.offsetHours=+(((((I*i/n)-tau)%I)+I)%I).toFixed(3); }); });
+}
 function buildAutoPlanV2(mode,opts){
   opts=opts||{};
   const topo=opts.topo||curTopo();
@@ -1138,9 +1154,7 @@ function buildAutoPlanV2Core(mode,opts){
     mat=v2Materialize(M);
   }
   const routes=mat.routes;
-  // offsets: stagger per source (arrival-aware staggering lands in S5)
-  const bySrc={}; routes.forEach(r=>(bySrc[r.from]=bySrc[r.from]||[]).push(r));
-  Object.values(bySrc).forEach(list=>list.forEach((r,i)=>r.offsetHours=+((r.interval*i/Math.max(1,list.length)).toFixed(3))));
+  const bySrc={}; routes.forEach(r=>(bySrc[r.from]=bySrc[r.from]||[]).push(r)); // (offsets are staggered after `kept`, sim-validated)
   // relay badges on crop chains through the capital/hub
   const hubish=new Set(M.vils.filter(m=>m.flags.hub||m.flags.capital).map(m=>m.id));
   routes.forEach(r=>{ if(r.flow.crop>1){
@@ -1148,11 +1162,24 @@ function buildAutoPlanV2Core(mode,opts){
     else if(hubish.has(r.from)&&routes.some(x=>x.to===r.from&&x.flow.crop>1)) r.relay='out'; } });
   routes.forEach(r=>{ r.resources={}; RES.forEach(k=>r.resources[k]=Math.round(r.flow[k]*r.interval)); });
   const kept=routes.filter(r=>RES.some(k=>r.resources[k]>=1));
-  // ---- S3: simulate the plan for 48h, repair what fails, and A/B against the v1 engine ----
+  // ---- S5: pick departure offsets. Arrival-aware phasing spreads each receiver's incoming
+  // deliveries evenly across the interval (steady trickle, smoother stock); source phasing spreads a
+  // source's own departures (fewer carrier collisions). The 48h sim is the judge - keep arrival-aware
+  // only when it doesn't add issues, so it can never regress a plan. ----
   let sim=null, simNote='', abNote='';
   if(kept.length){
     try{
-      sim=v2Simulate(M,kept,48);
+      // Arrival-aware phasing can only differ from source phasing when some receiver has >=2 incoming
+      // routes AND an interval is long enough to lump (>=2h). Only then pay the extra A/B sim; v2's
+      // usual interval=1 plans are already smooth, so they go straight to source phasing.
+      const inCnt={}; kept.forEach(r=>inCnt[r.to]=(inCnt[r.to]||0)+1);
+      const worthArr = kept.some(r=>(r.interval||1)>=2) && Object.values(inCnt).some(n=>n>=2);
+      if(worthArr){
+        v2StaggerArr(M,kept); const simArr=v2Simulate(M,kept,48); const arrOff=kept.map(r=>r.offsetHours);
+        v2StaggerSrc(kept);   let simPick=v2Simulate(M,kept,48);
+        if(simArr.issues.length < simPick.issues.length){ kept.forEach((r,i)=>r.offsetHours=arrOff[i]); simPick=simArr; } // adopt only if strictly better
+        sim=simPick;
+      } else { v2StaggerSrc(kept); sim=v2Simulate(M,kept,48); }
       for(let rp=0; rp<3 && sim.issues.length; rp++){ if(!v2Repair(M,kept,sim)) break; sim=v2Simulate(M,kept,48); }
       const isName=is=>is.type+(is.vid?(' '+((M.byId[is.vid]||{}).name||is.vid)):'')+(is.k?' '+is.k:'')+(is.cov!=null?' '+is.cov+'%':'')+(is.n?' x'+is.n:'');
       simNote = sim.issues.length
