@@ -395,6 +395,7 @@ function normalizeProfile(p, label){
   if(p.troopCropExtra==null) p.troopCropExtra=5; // % extra crop on troop-training cost (newly-made troops add upkeep)
   if(!p.tauCache) p.tauCache={}; // learned one-way travel times per "fromDid>toDid>kind" ({sec,src,at}), from synced routes
   if(!p.optEngine) p.optEngine='v1'; // Auto-Routes engine: 'v1' legacy greedy | 'v2' tiered min-cost flow (OPTIMIZER-DESIGN.md)
+  if(!p.optTopo) p.optTopo = p.cropToCapital ? 'centralize' : 'direct'; // v2 arc-set policy: direct | hub | centralize | auto (S4)
   ensureIds(p.villages); // backfill missing/duplicate ids so edit & delete always match
   dedupeAndSort(p);      // remove rename-duplicates (same coords) and order by village number
   return p;
@@ -777,6 +778,23 @@ const OVERFILL_HORIZON = 48; // h: allow filling a warehouse no faster than this
    re-injection pass so dropped/capped flow is re-routed instead of silently lost.
    v1 stays the default engine; the 48h simulator (S3) will validate these plans. */
 const V2={SCALE:1e6, RESV_PEN:1.5, CAP_PEN:1.1, HUB_EPS:1, ROOM_SAFETY:0.9, PASSES:2};
+// --- v2 arc-set policy (S4). A mode is just which crop arcs the graph allows; the engine is the same.
+//   direct     complete digraph (hubs are optional transshipment)
+//   hub        crop rides a star: donor -> hub, hub -> receiver only (l/c/i unrestricted)
+//   centralize village -> capital -> hub -> receivers (two-tier); t4 sweep sinks at the capital
+//   auto       build all applicable policies, score lexicographically, keep the winner
+// V2TOPO overrides the persisted state.optTopo while a candidate plan builds (used by Auto compare).
+let V2TOPO=null;
+function curTopo(){ return V2TOPO || state.optTopo || (state.cropToCapital?'centralize':'direct'); }
+function topoIsCentralize(){ return curTopo()==='centralize'; }
+function topoIsHub(){ return curTopo()==='hub'; }
+// Which policies can even run given the current villages (need a capital / hub respectively).
+function v2ApplicableTopos(M){
+  const t=['direct']; const hasCap=M.vils.some(m=>m.flags.capital), hasHub=M.vils.some(m=>m.flags.hub);
+  if(hasHub) t.push('hub');
+  if(hasCap) t.push('centralize');
+  return t;
+}
 function buildModelV2(){
   const flows=planFlows(), committed=planCommitted();
   const vils=state.villages.map(v=>{
@@ -825,14 +843,15 @@ function v2Demands(M,mode){
         if(room>1) t3.push({vid:m.id,k,rate:room/WAREHOUSE_FILL_H,tier:'t3'}); });
     });
   }
-  if(state.cropToCapital){ const cap=M.vils.find(m=>m.flags.capital);
+  if(topoIsCentralize()){ const cap=M.vils.find(m=>m.flags.capital);
     if(cap){ const room=Math.max(0,(cap.cap.crop||0)-(cap.stock.crop||0));
       if(room>1) t4.push({vid:cap.id,k:'crop',rate:room/OVERFILL_HORIZON,tier:'t4'}); } }
   return {t0,t1,t3,t4};
 }
 // Which villages may relay crop through themselves (flow in -> flow out).
 function v2Transship(M,m,anyHub){
-  if(state.cropToCapital && M.vils.some(x=>x.flags.capital)) return m.flags.capital||m.flags.hub;
+  if(topoIsCentralize() && M.vils.some(x=>x.flags.capital)) return m.flags.capital||m.flags.hub;
+  if(topoIsHub()) return m.flags.hub;               // hub star: only the hub relays
   return anyHub ? m.flags.hub : !m.flags.troop;
 }
 // Mode topology: which (u -> w) legs exist for this resource/tier.
@@ -841,11 +860,13 @@ function v2AllowPair(M,u,w,k,tier,opts){
   if(u.flags.troop) return false;
   if(tier==='t4') return !!w.flags.capital;         // sweep goes straight to the capital
   const capM=M.vils.find(m=>m.flags.capital);
-  if(state.cropToCapital && capM){                  // centralize: village -> capital -> hub -> receivers
+  if(topoIsCentralize() && capM){                   // centralize: village -> capital -> hub -> receivers
     const hubM=M.vils.find(m=>m.flags.hub&&!m.flags.capital);
     if(hubM){ if(u.flags.capital) return w.id===hubM.id; if(u.id===hubM.id) return true; return w.id===capM.id; }
     return u.flags.capital ? true : w.id===capM.id; // no distinct hub: capital distributes itself
   }
+  if(topoIsHub() && M.vils.some(m=>m.flags.hub))     // hub distribute: crop rides the star only
+    return w.flags.hub || u.flags.hub;              // donor -> hub, or hub -> receiver
   const anyHub=M.vils.some(m=>m.flags.hub);
   if(!opts.allowCapDirect && anyHub && u.flags.capital && !u.flags.hub && !w.flags.hub) return false; // capital feeds the hub
   return true;
@@ -1085,7 +1106,15 @@ function v2Repair(M,routes,sim){
   });
   return changed;
 }
-function buildAutoPlanV2(mode){
+function buildAutoPlanV2(mode,opts){
+  opts=opts||{};
+  const topo=opts.topo||curTopo();
+  if(topo==='auto' && !opts.topo) return buildAutoPlanV2Auto(mode);   // Auto: score all policies, keep the winner
+  const prev=V2TOPO; V2TOPO=topo;
+  try{ return buildAutoPlanV2Core(mode,opts); } finally{ V2TOPO=prev; }
+}
+function buildAutoPlanV2Core(mode,opts){
+  opts=opts||{};
   const tStart=performance.now();
   const M=buildModelV2(); v2Bands(M);
   const dems=v2Demands(M,mode);
@@ -1130,7 +1159,7 @@ function buildAutoPlanV2(mode){
         ? ` <span style="color:var(--warn)" title="${esc(sim.issues.map(isName).join(', '))}">&#9888; sim: ${sim.issues.length} issue${sim.issues.length>1?'s':''} after repair</span>`
         : ' <span style="color:var(--ok)" title="48h discrete-event simulation: no starvation, requirements fed, no overflow loss, no skipped sends">&#10003; sim: 48h clean</span>';
     }catch(err){ simNote=' <span style="color:var(--faint)">(sim error)</span>'; }
-    try{ // A/B: run the v1 engine on the same state and simulate ITS plan with the same physics
+    if(!opts.noAB) try{ // A/B: run the v1 engine on the same state and simulate ITS plan with the same physics
       const eng=state.optEngine; state.optEngine='v1'; let p1; try{ p1=buildAutoPlan(mode); } finally { state.optEngine=eng; }
       const carr=pl=>pl.routes.reduce((s,r)=>s+(r.merchants||0)+(r.ships||0),0);
       const mv=pl=>Math.round(pl.routes.reduce((s,r)=>s+RES.reduce((x,k)=>x+((r.flow&&r.flow[k])||((r.resources&&r.resources[k])||0)/(r.interval||1)),0),0));
@@ -1157,7 +1186,40 @@ function buildAutoPlanV2(mode){
   if(carrierLimited.length)
     unmetNote+=`<p class="note">&#9650; Carrier-limited &mdash; surplus stuck at home (no free merchants/ships): ${carrierLimited.map(c=>`<b>${esc(c.name)}</b> (${RES.filter(k=>c.res[k]>=1).map(k=>`<span style="color:var(--${k})">${fmt(c.res[k])} ${k}</span>`).join(' &middot; ')}/h)`).join('; ')}.</p>`;
   unmetNote+=abNote;
-  return {routes:kept, summary, unmetNote, cropPlan:null, carrierLimited, sim};
+  return {routes:kept, summary, unmetNote, cropPlan:null, carrierLimited, sim, hardUnmet, topo:V2TOPO||curTopo(), moved};
+}
+// Auto mode: build every applicable arc-policy, score each lexicographically, keep the winner and
+// show the comparison. Score vector (all "lower is better", compared in order):
+//   [ starvation, unmet-requirement rate, overflow loss, carrier-hours, #routes ]
+function v2PlanScore(M,plan){
+  const sim=plan.sim||{issues:[]};
+  const starve=sim.issues.filter(i=>i.type==='starve').length;
+  let unmet=(plan.hardUnmet||[]).reduce((s,u)=>s+u.rate,0);
+  sim.issues.filter(i=>i.type==='undersupplied').forEach(i=>unmet+=(100-(i.cov||0))); // coverage gap as a proxy rate
+  const overflow=sim.issues.filter(i=>i.type==='overflow').reduce((s,i)=>s+(i.amt||0),0);
+  const carrierH=plan.routes.reduce((s,r)=>{ const kind=(r.ships||0)>0&&!(r.merchants>0)?'ship':'merchant';
+    const U=M.byId[r.from], W=M.byId[r.to]; const tau=(U&&W)?tauH(U.v,W.v,kind):1;
+    return s+((r.merchants||0)+(r.ships||0))*2*tau; },0);
+  return [starve, +unmet.toFixed(1), overflow, +carrierH.toFixed(1), plan.routes.length];
+}
+function v2ScoreLess(a,b){ for(let i=0;i<a.length;i++){ if(a[i]<b[i]-1e-9) return true; if(a[i]>b[i]+1e-9) return false; } return false; }
+function buildAutoPlanV2Auto(mode){
+  const M0=buildModelV2(); const topos=v2ApplicableTopos(M0);
+  const TL={direct:'Direct balance', hub:'Hub distribute', centralize:'Capital centralize'};
+  const cands=topos.map(t=>{ const plan=buildAutoPlanV2(mode,{topo:t,noAB:true}); return {t,plan,score:v2PlanScore(M0,plan)}; });
+  let win=cands[0]; cands.forEach(c=>{ if(v2ScoreLess(c.score,win.score)) win=c; });
+  const cell=(c,i,best)=>`<td style="text-align:right;padding:2px 8px${c.t===win.t?';font-weight:700':''}">${best?'<span style="color:var(--ok)">':''}${i}${best?'</span>':''}</td>`;
+  const fmtScore=s=>[fmt(s[0]),fmt(s[1]),fmt(s[2]),fmt(s[3]),s[4]];
+  const cols=['starve','unmet/h','overflow','carrier-h','routes'];
+  const rows=cands.map(c=>{ const s=fmtScore(c.score);
+    return `<tr${c.t===win.t?' style="background:rgba(80,200,120,.08)"':''}><td style="padding:2px 8px">${c.t===win.t?'&#9654; ':''}${TL[c.t]||c.t}</td>${
+      s.map((v,i)=>cell(c,v,cands.every(o=>c.score[i]<=o.score[i]))).join('')}<td style="padding:2px 8px;color:var(--faint)">${c.plan.sim&&c.plan.sim.issues.length?c.plan.sim.issues.length+' sim issue(s)':'&#10003; clean'}</td></tr>`; }).join('');
+  const table=`<div class="note" style="margin-top:6px"><b>Auto mode</b> compared ${cands.length} policy${cands.length>1?'ies':'y'} (lexicographic: ${cols.join(' &gt; ')}). Winner: <b>${TL[win.t]||win.t}</b>.
+    <table style="border-collapse:collapse;margin-top:4px;font-size:12px"><thead><tr><th style="text-align:left;padding:2px 8px">policy</th>${cols.map(c=>`<th style="text-align:right;padding:2px 8px">${c}</th>`).join('')}<th style="text-align:left;padding:2px 8px">48h sim</th></tr></thead><tbody>${rows}</tbody></table></div>`;
+  const plan=win.plan;
+  plan.summary=plan.summary.replace('[v2]','[v2&middot;auto]');
+  plan.unmetNote=(plan.unmetNote||'')+table;
+  return plan;
 }
 function buildAutoPlan(mode){
   if((state.optEngine||'v1')==='v2') return buildAutoPlanV2(mode);
@@ -1395,7 +1457,13 @@ function renderOptimizer(){
       <label title="The hero's resource production is added to whatever village it currently sits in. Check this to plan without it (the hero can move, die, or be reassigned) - set each hero village's Hero production /h in its Edit form."><input type="checkbox" ${state.ignoreHeroProd?'checked':''} onchange="state.ignoreHeroProd=this.checked;save();renderAll()"> Ignore hero production</label>
       <span title="What the last game pull detected in your production numbers" style="font-size:11px;color:var(--faint);align-self:center">detected: <b style="color:${bs.active?'var(--accent)':'var(--faint)'}">${esc(bs.text)}</b></span>
       <label title="Extra % crop delivered to each troop village, scaling its whole crop draining — covers the growing upkeep of the troops being produced">Troop crop buffer %: <input type="number" min="0" value="${state.troopCropExtra==null?5:state.troopCropExtra}" style="width:50px" onchange="state.troopCropExtra=Math.max(0,+this.value||0);save();renderAll()"></label>
-      <label title="Centralize crop: every village ships its whole crop surplus to the Capital, the Capital forwards it to your Crop hub, and the hub redistributes to draining villages (village -> capital -> hub -> deficits). Distribution rides the hub's trade ships, so lumber/clay/iron routing is untouched; only the collection legs share merchants. Needs a Capital marked (and a Crop hub for the middle leg). Crop is booked before L/C/I."><input type="checkbox" ${state.cropToCapital?'checked':''} onchange="state.cropToCapital=this.checked;save();renderAll()"> Centralize all crop (village &rarr; capital &rarr; hub)</label>
+      <label title="Crop routing policy (v2 engine). Direct: any donor ships straight to any draining village. Hub distribute: crop rides a star through your Crop hub (donor -> hub -> receiver). Capital centralize: every village -> Capital -> hub -> draining villages; distribution rides the hub's trade ships so l/c/i is untouched. Auto: builds all applicable policies, scores them (starvation > unmet > overflow > carrier-hours > routes) and keeps the winner - the comparison is shown under the summary. Hub needs a Crop hub marked; Centralize needs a Capital.">Crop policy:
+        <select onchange="state.optTopo=this.value;state.cropToCapital=(this.value==='centralize');save();renderAll()">
+          <option value="direct" ${state.optTopo==='direct'?'selected':''}>Direct balance</option>
+          <option value="hub" ${state.optTopo==='hub'?'selected':''}>Hub distribute (via crop hub)</option>
+          <option value="centralize" ${state.optTopo==='centralize'?'selected':''}>Capital centralize (&rarr; hub)</option>
+          <option value="auto" ${state.optTopo==='auto'?'selected':''}>Auto (compare &amp; pick)</option>
+        </select></label>
       <span class="note" style="margin:0" title="A Trainer artifact is detected from the Treasury on Pull & Sync and normalizes each village's training time. Per troop village you can override it (plan with/without the trainer) in that village's Edit form.">Trainer artifact: detected from Treasury &middot; per-village override in Edit</span>
       <label title="Plan a complete route set ignoring your existing routes (Save replaces the optimizer's previous routes). Uncheck to plan only the gap on top of what you already run."><input type="checkbox" ${optFromScratch?'checked':''} onchange="optFromScratch=this.checked;state.optFromScratch=optFromScratch;save();renderOptimizer()"> From scratch</label>
       <label>Server URL: <input type="text" value="${esc(state.serverUrl||'')}" placeholder="https://rof.x2.europe.travian.com" style="width:220px" onchange="state.serverUrl=this.value.trim().replace(/\/+$/,'');detectServerSpeed(state.serverUrl);renderAll()"></label>

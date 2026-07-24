@@ -8,7 +8,7 @@
 - [x] **S1 — Foundations**: torus `dist()`, `tauH()` + `tauCache` learned travel times, puller v1.11.0 (`travelSec`/`kind`/`ships`), ship-route carrier ledger — commit `178912f`
 - [x] **S2 — Flow core**: Model build, tiers T0–T4, SSP min-cost flow, tier-class materialization + re-injection, `v1 | v2` engine toggle (v1 default)
 - [x] **S3 — Simulator**: 48h discrete-event sim (A1 partial sends, carrier round trips) + repair loop (interval↓/trim/restagger) + A/B v1-vs-v2 line, sim verdict in the plan summary
-- [ ] **S4 — Modes & diff-apply**: hub/centralize/auto arc policies, minimal changeset apply, v2 default
+- [~] **S4 — Modes & diff-apply**: diff-apply changeset ✓ (`f7c753d`) · direct/hub/centralize/auto arc policies + Auto lexicographic compare ✓ · v2 default flip pending
 - [ ] **S5 — Polish**: deliveries n×, arrival-aware staggering, NPC hint, dead-code removal
 
 ---
