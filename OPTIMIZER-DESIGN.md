@@ -8,8 +8,11 @@
 - [x] **S1 — Foundations**: torus `dist()`, `tauH()` + `tauCache` learned travel times, puller v1.11.0 (`travelSec`/`kind`/`ships`), ship-route carrier ledger — commit `178912f`
 - [x] **S2 — Flow core**: Model build, tiers T0–T4, SSP min-cost flow, tier-class materialization + re-injection, `v1 | v2` engine toggle (v1 default)
 - [x] **S3 — Simulator**: 48h discrete-event sim (A1 partial sends, carrier round trips) + repair loop (interval↓/trim/restagger) + A/B v1-vs-v2 line, sim verdict in the plan summary
-- [~] **S4 — Modes & diff-apply**: diff-apply changeset ✓ (`f7c753d`) · direct/hub/centralize/auto arc policies + Auto lexicographic compare ✓ · v2 default flip pending
-- [~] **S5 — Polish**: dead-code removal ✓ (`24c7701`) · arrival-aware staggering ✓ (sim-validated, guarded) · NPC-merchant hint ✓ · deliveries n× pending
+- [x] **S4 — Modes & diff-apply**: diff-apply changeset ✓ (`f7c753d`) · direct/hub/centralize/auto arc policies + Auto lexicographic compare ✓ (`117570b`) · **v2 is now the default engine** (one-time profile migration; v1 kept as "legacy" fallback)
+- [x] **S5 — Polish**: dead-code removal ✓ (`24c7701`) · arrival-aware staggering ✓ (`c5a127c`, sim-validated, guarded) · NPC-merchant hint ✓ (`d134576`) · burst-fill hint ✓ (exact sim deficit, gated by optMinRoute)
+- Extra user features: "Excess crop → Capital" sink in any policy (`0bfbc47`) · actionable "not enough carrier capacity → upgrade Trade Office" warning (`0bfbc47`) · merged the in-game route-apply feature (`65f8400`)
+
+**v2 is complete and shipped as the default optimizer engine.** All S1–S5 stages done; every plan is validated by the 48h simulator with repair, and the A/B line still runs v1 on the same state for comparison.
 
 ---
 
@@ -357,4 +360,4 @@ routes all surface as concrete failed checks *before* the user sees the plan.
 ## P9. Implementation stages (unchanged from §7, now mapped to spec sections)
 S1 = P0 (torus + τ + puller) · S2 = P1–P3 behind toggle · S3 = P4 + A/B · S4 = P5 modes/diff, default v2 · S5 = polish (deliveries n×, NPC hint, arrival-aware refinements).
 
-**Status: S3 implemented — every v2 plan is validated by a 48h discrete-event simulation (partial sends per A1, exact carrier round trips, training burn, overflow loss) with ≤3 targeted repair passes (starvation → interval down + offset 0; overflow → trim inflow; skips → restagger), and the summary shows the sim verdict plus an A/B line running the v1 engine on the same state through the same simulator. Full plan+sim+A/B ≈ 5ms, deterministic. Next: user sanity-check of Engine=v2 on real synced data, then S4 (diff-apply, Auto mode compare, v2 default).**
+**Status: COMPLETE — v2 is the default engine (S1–S5 all done).** Every v2 plan is validated by a 48h discrete-event simulation (partial sends per A1, exact carrier round trips, training burn, overflow loss) with ≤3 targeted repair passes (starvation → interval down + offset 0; overflow → trim inflow; skips → restagger). Crop-routing policies (direct/hub/centralize/auto) select the arc set; Auto compares them lexicographically. Apply is a minimal diff (add/update/delete by from>to>kind identity). Plan hints: carrier-limited → upgrade Trade Office, un-movable crop → NPC merchant, transient low granary → one-time burst-fill (exact sim deficit), excess crop → Capital sink. The summary shows the sim verdict plus an A/B line running the legacy v1 engine on the same state through the same simulator. Full plan+sim+A/B ≈ 5ms, deterministic.**

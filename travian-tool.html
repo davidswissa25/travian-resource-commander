@@ -397,7 +397,8 @@ function normalizeProfile(p, label){
   if(p.ignoreHeroProd==null) p.ignoreHeroProd=false; // plan without the hero's resource production (the hero can move/die/be reassigned)
   if(p.troopCropExtra==null) p.troopCropExtra=5; // % extra crop on troop-training cost (newly-made troops add upkeep)
   if(!p.tauCache) p.tauCache={}; // learned one-way travel times per "fromDid>toDid>kind" ({sec,src,at}), from synced routes
-  if(!p.optEngine) p.optEngine='v1'; // Auto-Routes engine: 'v1' legacy greedy | 'v2' tiered min-cost flow (OPTIMIZER-DESIGN.md)
+  if(!p.optEngine) p.optEngine='v2'; // Auto-Routes engine: 'v2' tiered min-cost flow (default) | 'v1' legacy greedy (OPTIMIZER-DESIGN.md)
+  if(!p.optEngineV2Default){ p.optEngineV2Default=true; if(p.optEngine==='v1') p.optEngine='v2'; } // one-time flip of existing profiles to v2; a later manual switch to v1 sticks
   if(!p.optTopo) p.optTopo = p.cropToCapital ? 'centralize' : 'direct'; // v2 arc-set policy: direct | hub | centralize | auto (S4)
   if(p.cropExcessToCapital==null) p.cropExcessToCapital=false; // sweep leftover crop surplus to the Capital (overflow in one place) in any policy
   ensureIds(p.villages); // backfill missing/duplicate ids so edit & delete always match
@@ -1034,9 +1035,9 @@ function v2Ins(q,e){ let lo=0,hi=q.length; while(lo<hi){ const md=(lo+hi)>>1; if
 // overflow loss, skipped sends. This is the structural guard against phantom-coverage plans.
 function v2Simulate(M,routes,horizon){
   horizon=horizon||48;
-  const st={}, free={}, loss={}, burnW={}, burnD={}, skips=[], starved={};
+  const st={}, free={}, loss={}, burnW={}, burnD={}, skips=[], starved={}, deficit={};
   M.vils.forEach(m=>{ st[m.id]={...m.stock}; free[m.id]={merchant:m.free.merchant,ship:m.free.ship};
-    loss[m.id]={lumber:0,clay:0,iron:0,crop:0}; burnW[m.id]={lumber:0,clay:0,iron:0}; burnD[m.id]={lumber:0,clay:0,iron:0}; });
+    loss[m.id]={lumber:0,clay:0,iron:0,crop:0}; burnW[m.id]={lumber:0,clay:0,iron:0}; burnD[m.id]={lumber:0,clay:0,iron:0}; deficit[m.id]=0; });
   const amb={}; M.vils.forEach(m=>{ amb[m.id]={}; RES.forEach(k=>amb[m.id][k]=v2Net(m,k)); });
   const q=[];
   routes.forEach((r,ri)=>{
@@ -1053,7 +1054,7 @@ function v2Simulate(M,routes,horizon){
       let v=st[m.id][k]+amb[m.id][k]*dt;
       if(m.flags.target&&k!=='crop'){ const want=(m.needs[k]||0)*dt; burnW[m.id][k]+=want;
         const got=Math.min(Math.max(0,v),want); burnD[m.id][k]+=got; v-=got; }
-      if(v<0){ if(k==='crop'&&starved[m.id]==null) starved[m.id]=+to.toFixed(1); v=0; }
+      if(v<0){ if(k==='crop'){ if(starved[m.id]==null) starved[m.id]=+to.toFixed(1); if(-v>deficit[m.id]) deficit[m.id]=-v; } v=0; }
       const cp=m.cap[k]||0; if(cp>0&&v>cp){ loss[m.id][k]+=v-cp; v=cp; }
       st[m.id][k]=v; }); });
     lastT=to; };
@@ -1082,7 +1083,7 @@ function v2Simulate(M,routes,horizon){
     RES.forEach(k=>{ if(loss[m.id][k]>Math.max(1000,(m.cap[k]||0)*0.05)) issues.push({type:'overflow',vid:m.id,k,amt:Math.round(loss[m.id][k])}); });
   });
   if(skips.length) issues.push({type:'skips',n:skips.length});
-  return {issues, skips, loss, starved};
+  return {issues, skips, loss, starved, deficit};
 }
 // Targeted plan repair from sim issues (<=3 loops): starvation -> serve that receiver more often
 // (interval one notch down, offset 0 so the first batch lands early); overflow -> trim the inflow;
@@ -1231,6 +1232,20 @@ function buildAutoPlanV2Core(mode,opts){
     const b=[...npcOver].sort().map(n=>`<b>${esc(n)}</b> (granary overflowing)`);
     unmetNote+=`<p class="note">&#128161; <b>NPC merchant</b> &mdash; crop no carrier can move: ${a.concat(b).join('; ')}. Trade it into lumber/clay/iron locally (3 Gold) &mdash; no granary loss, and it feeds construction.</p>`;
   }
+  // Burst-fill hint (S5, "deliveries n x"): a village the sim still starves although its steady crop
+  // net is >=0 just started too low - one big top-up now (Travian's n x deliveries) bridges it so the
+  // route can keep its normal interval, instead of the plan permanently over-shortening the interval
+  // to nurse a one-time hole. sim.deficit is the exact crop the trough went below zero.
+  if(sim && sim.starved){
+    const inR={}, outR={}; kept.forEach(r=>{ const c=r.flow.crop||0; if(c>0){ inR[r.to]=(inR[r.to]||0)+c; outR[r.from]=(outR[r.from]||0)+c; } });
+    const burst=[];
+    Object.keys(sim.starved).forEach(vid=>{ const m=M.byId[vid]; if(!m) return;
+      const net=(m.prod.crop||0)-(m.upkeep||0)+(inR[vid]||0)-(outR[vid]||0), need=Math.round((sim.deficit&&sim.deficit[vid])||0);
+      if(net>=-0.5 && need>=Math.max(1,optMinRoute)) burst.push({name:m.name, need, t:sim.starved[vid]}); });
+    if(burst.length){ burst.sort((x,y)=>x.t-y.t);
+      unmetNote+=`<p class="note">&#9889; <b>Burst-fill once</b> &mdash; ${burst.map(b=>`<b>${esc(b.name)}</b> (~${fmt(b.need)} crop, first dips at ${fmt(b.t)}h)`).join('; ')}. Steady supply is fine &mdash; they just start too low. Send this once now (Travian&rsquo;s n&times; deliveries) so the plan keeps its normal interval instead of over-shortening it.</p>`;
+    }
+  }
   unmetNote+=abNote;
   return {routes:kept, summary, unmetNote, cropPlan:null, carrierLimited, sim, hardUnmet, topo:V2TOPO||curTopo(), moved};
 }
@@ -1268,7 +1283,7 @@ function buildAutoPlanV2Auto(mode){
   return plan;
 }
 function buildAutoPlan(mode){
-  if((state.optEngine||'v1')==='v2') return buildAutoPlanV2(mode);
+  if((state.optEngine||'v2')==='v2') return buildAutoPlanV2(mode);
   const cropPlan=optimize();
   const all = mode==='all';
   const troopPlan = all ? optimizeTroopSupply(cropPlan) : {routes:[]};
@@ -1529,10 +1544,10 @@ function renderOptimizer(){
           <option value="crop" ${optMode==='crop'?'selected':''}>Crop only (anti-starvation)</option>
           <option value="all" ${optMode==='all'?'selected':''}>All-in-one (crop + troops + celebrations + overflow)</option>
         </select></label>
-      <label title="v1 = current greedy planner. v2 (beta) = tiered min-cost-flow engine (OPTIMIZER-DESIGN.md): starvation -> requirements -> overflow -> stockpile, learned travel times, re-injection instead of dropping flow. The 48h simulator that validates v2 plans lands in stage S3.">Engine:
+      <label title="v2 (default) = tiered min-cost-flow engine (OPTIMIZER-DESIGN.md): starvation -> requirements -> overflow -> stockpile, learned travel times, re-injection instead of dropping flow, crop-routing policies (direct/hub/centralize/auto), and every plan validated by a 48h simulation with repair. v1 = the legacy greedy planner, kept as a fallback.">Engine:
         <select onchange="state.optEngine=this.value;save();renderOptimizer()">
-          <option value="v1" ${(state.optEngine||'v1')==='v1'?'selected':''}>v1</option>
-          <option value="v2" ${state.optEngine==='v2'?'selected':''}>v2 (beta)</option>
+          <option value="v2" ${(state.optEngine||'v2')==='v2'?'selected':''}>v2 (default)</option>
+          <option value="v1" ${state.optEngine==='v1'?'selected':''}>v1 (legacy)</option>
         </select></label>
       <label title="Per hour of each resource to keep in a Still-building village before it donates (0 elsewhere)">Build buffer /h: <input type="number" value="${optMargin}" style="width:64px" onchange="optMargin=+this.value||0;state.optMargin=optMargin;save();renderOptimizer()"></label>
       <label title="Smallest route worth creating - routes below this hourly flow are dropped">Min route /h: <input type="number" value="${optMinRoute}" style="width:64px" onchange="optMinRoute=+this.value||0;state.optMinRoute=optMinRoute;save();renderOptimizer()"></label>
