@@ -396,6 +396,7 @@ function normalizeProfile(p, label){
   if(!p.tauCache) p.tauCache={}; // learned one-way travel times per "fromDid>toDid>kind" ({sec,src,at}), from synced routes
   if(!p.optEngine) p.optEngine='v1'; // Auto-Routes engine: 'v1' legacy greedy | 'v2' tiered min-cost flow (OPTIMIZER-DESIGN.md)
   if(!p.optTopo) p.optTopo = p.cropToCapital ? 'centralize' : 'direct'; // v2 arc-set policy: direct | hub | centralize | auto (S4)
+  if(p.cropExcessToCapital==null) p.cropExcessToCapital=false; // sweep leftover crop surplus to the Capital (overflow in one place) in any policy
   ensureIds(p.villages); // backfill missing/duplicate ids so edit & delete always match
   dedupeAndSort(p);      // remove rename-duplicates (same coords) and order by village number
   return p;
@@ -843,8 +844,10 @@ function v2Demands(M,mode){
         if(room>1) t3.push({vid:m.id,k,rate:room/WAREHOUSE_FILL_H,tier:'t3'}); });
     });
   }
-  if(topoIsCentralize()){ const cap=M.vils.find(m=>m.flags.capital);
+  if(topoIsCentralize() || state.cropExcessToCapital){ const cap=M.vils.find(m=>m.flags.capital);
     if(cap){ const room=Math.max(0,(cap.cap.crop||0)-(cap.stock.crop||0));
+      // Sweep is bounded by the Capital's room over the fill horizon; the 48h sim + repair further
+      // throttles it to whatever the Capital can hold without overflowing, so it can't overshoot.
       if(room>1) t4.push({vid:cap.id,k:'crop',rate:room/OVERFILL_HORIZON,tier:'t4'}); } }
   return {t0,t1,t3,t4};
 }
@@ -1211,7 +1214,8 @@ function buildAutoPlanV2Core(mode,opts){
     hardUnmet.forEach(u2=>{ const m=M.byId[u2.vid]; (byV[m.name]=byV[m.name]||[]).push(fmt(u2.rate)+' '+u2.k+'/h ('+u2.reason+')'); });
     unmetNote=`<p class="note">&#9888; <b>[v2]</b> unmet: ${Object.keys(byV).sort().map(n=>`<b>${esc(n)}</b>: ${byV[n].join(', ')}`).join('; ')}.</p>`; }
   if(carrierLimited.length)
-    unmetNote+=`<p class="note">&#9650; Carrier-limited &mdash; surplus stuck at home (no free merchants/ships): ${carrierLimited.map(c=>`<b>${esc(c.name)}</b> (${RES.filter(k=>c.res[k]>=1).map(k=>`<span style="color:var(--${k})">${fmt(c.res[k])} ${k}</span>`).join(' &middot; ')}/h)`).join('; ')}.</p>`;
+    unmetNote+=`<p class="note">&#9650; <b>Not enough carrier capacity</b> &mdash; these villages can't move all their surplus (every merchant/ship busy, so resources sit unused): ${carrierLimited.map(c=>{ const v=(M.byId[c.id]||{}).v||{}, nm=maxMerchants(v), mc=Math.round(effCap(v)), ns=maxShips(v);
+      return `<b>${esc(c.name)}</b> &mdash; ${RES.filter(k=>c.res[k]>=1).map(k=>`<span style="color:var(--${k})">${fmt(c.res[k])} ${k}</span>`).join(' &middot; ')}/h stuck <span style="color:var(--faint)">(now ${nm}&times;${fmt(mc)} merchant cap${ns?` + ${ns} ship`+(ns>1?'s':''):''})</span>`; }).join('; ')}. Upgrade <b>Trade Office</b> (bigger merchant loads), <b>Marketplace</b> (more merchants), or build <b>trade ships</b> (Harbor) to move it.</p>`;
   // NPC-merchant hint (S5): crop the plan can't move - stuck for lack of carriers, or overflowing the
   // granary. The NPC merchant (3 Gold) rebalances a village's OWN stores into any ratio, so converting
   // that dead crop into lumber/clay/iron locally avoids the loss and feeds construction.
@@ -1357,7 +1361,8 @@ function buildAutoPlan(mode){
   if(overflowPlan.urgent && overflowPlan.urgent.length)
     unmetNote += `<p class="note">&#9888; Warehouse still filling within ${WAREHOUSE_FILL_H}h (out of carriers or troop-village room): ${overflowPlan.urgent.join(", ")}. Raise Marketplace levels/trade ships or add another troop village.</p>`;
   if(carrierLimited.length)
-    unmetNote += `<p class="note">&#9650; Carrier-limited &mdash; these villages still hold surplus they <b>can&rsquo;t move</b> (no free merchants/ships left, so not all their resources are used): ${carrierLimited.map(c=>`<b>${esc(c.name)}</b> (${RES.filter(k=>c.res[k]>=1).map(k=>`<span style="color:var(--${k})">${fmt(c.res[k])} ${k}</span>`).join(' &middot; ')}/h)`).join("; ")}. Raise their Marketplace level or add trade ships to move it.</p>`;
+    unmetNote += `<p class="note">&#9650; <b>Not enough carrier capacity</b> &mdash; these villages can't move all their surplus (no free merchants/ships left, so resources sit unused): ${carrierLimited.map(c=>{ const v=state.villages.find(x=>x.id===c.id)||{}, nm=maxMerchants(v), mc=Math.round(effCap(v)), ns=maxShips(v);
+      return `<b>${esc(c.name)}</b> &mdash; ${RES.filter(k=>c.res[k]>=1).map(k=>`<span style="color:var(--${k})">${fmt(c.res[k])} ${k}</span>`).join(' &middot; ')}/h stuck <span style="color:var(--faint)">(now ${nm}&times;${fmt(mc)} merchant cap${ns?` + ${ns} ship`+(ns>1?'s':''):''})</span>`; }).join("; ")}. Upgrade <b>Trade Office</b> (bigger merchant loads), <b>Marketplace</b> (more merchants), or build <b>trade ships</b> (Harbor) to move it.</p>`;
   return {routes, summary, unmetNote, cropPlan, carrierLimited};
 }
 function renderUnified(plan){
@@ -1503,6 +1508,7 @@ function renderOptimizer(){
           <option value="centralize" ${state.optTopo==='centralize'?'selected':''}>Capital centralize (&rarr; hub)</option>
           <option value="auto" ${state.optTopo==='auto'?'selected':''}>Auto (compare &amp; pick)</option>
         </select></label>
+      <label title="After every crop requirement is met, sweep each village's LEFTOVER crop surplus to the Capital (bounded by the Capital's granary room) so your overflow piles up in one place - easier to NPC or manage than scattered across villages. Works with any crop policy; already implied by Capital centralize. Needs a Capital marked. (v2 engine.)"><input type="checkbox" ${state.cropExcessToCapital?'checked':''} ${state.optTopo==='centralize'?'disabled':''} onchange="state.cropExcessToCapital=this.checked;save();renderAll()"> Excess crop &rarr; Capital</label>
       <span class="note" style="margin:0" title="A Trainer artifact is detected from the Treasury on Pull & Sync and normalizes each village's training time. Per troop village you can override it (plan with/without the trainer) in that village's Edit form.">Trainer artifact: detected from Treasury &middot; per-village override in Edit</span>
       <label title="Plan a complete route set ignoring your existing routes (Save replaces the optimizer's previous routes). Uncheck to plan only the gap on top of what you already run."><input type="checkbox" ${optFromScratch?'checked':''} onchange="optFromScratch=this.checked;state.optFromScratch=optFromScratch;save();renderOptimizer()"> From scratch</label>
       <label>Server URL: <input type="text" value="${esc(state.serverUrl||'')}" placeholder="https://rof.x2.europe.travian.com" style="width:220px" onchange="state.serverUrl=this.value.trim().replace(/\/+$/,'');detectServerSpeed(state.serverUrl);renderAll()"></label>
