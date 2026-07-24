@@ -922,9 +922,23 @@ function v2Solve(M,dem,ledger,opts){
   const arcs=[];
   const add=(u,v,cap,cost,meta)=>{ if(cap<=0.5) return; arcs.push({u,v,cap,cost:Math.max(0,Math.round(cost)),flow:0,meta}); };
   const anyHub=M.vils.some(m=>m.flags.hub);
+  // The sweep (t4 -> Capital) is limited by the receiver's room, so a plain min-cost flow saturates the
+  // NEAREST donors and leaves the rest sending nothing. Spread it across every donor with excess by
+  // water-filling: find the level L where sum(min(excess_i, L)) = demand, and cap each donor at L. When
+  // the demand exceeds total excess, L stays Infinity and everyone sends all - so this only bites when
+  // the Capital can't take everyone's full surplus, which is exactly the "send some if not all" case.
+  let spreadCap=Infinity;
+  if(dem.tier==='t4'){
+    const es=M.vils.filter(m=>m.id!==dem.vid).map(m=>m.sur.free[dem.k]||0).filter(e=>e>0.5).sort((a,b)=>a-b);
+    let rem=dem.rate;
+    for(let i=0;i<es.length;i++){ if(es[i]*(es.length-i)>=rem){ spreadCap=rem/(es.length-i); break; } rem-=es[i]; }
+    // but don't spread so thin that every route falls under optMinRoute and gets dropped (sending
+    // nothing) - keep each share at least the min route, which naturally limits how many donors chip in.
+    if(spreadCap<Infinity) spreadCap=Math.max(spreadCap, optMinRoute||0);
+  }
   M.vils.forEach((m,i)=>{
     if(m.id!==dem.vid){ // the receiver's own production is already netted into the demand
-      add(S,out(i),m.sur.free[dem.k]||0,0,{band:'free',vid:m.id});
+      add(S,out(i),Math.min(m.sur.free[dem.k]||0, spreadCap),0,{band:'free',vid:m.id});
       if(dem.tier==='t0'||dem.tier==='t1')
         add(S,out(i),m.sur.resv[dem.k]||0,v2MinArcCost(M,m,ledger)*(V2.RESV_PEN-1)+1,{band:'resv',vid:m.id});
     }
