@@ -4,6 +4,7 @@
 //  - Forwards freshly pulled game data (written by the content script) into the iframe.
 const SYNC_KEY = 'tc_sync';    // latest game pull, written by content.js
 const STORE_KEY = 'tc_store';  // persisted snapshot of the tool's localStorage
+const APPLY_KEY = 'tc_apply';  // plan of routes to create in-game, read by content.js's Apply panel
 const enc = obj => btoa(unescape(encodeURIComponent(JSON.stringify(obj || {}))));
 
 const iframe = document.getElementById('app');
@@ -19,6 +20,11 @@ window.addEventListener('message', ev => {
   const d = ev && ev.data; if (!d || !d.__tc) return;
   if (d.__tc === 'save') {
     chrome.storage.local.set({ [STORE_KEY]: d.store || {} });
+  } else if (d.__tc === 'apply') {
+    // "Apply in game": stash the proposed routes for the game tab's ⚡ Apply routes panel, which
+    // pre-fills the in-game create form for each (the user still presses Create themselves).
+    const plan = d.plan || {};
+    chrome.storage.local.set({ [APPLY_KEY]: { ts: Date.now(), account: plan.account || null, routes: plan.routes || [] } });
   } else if (d.__tc === 'ready') {
     ready = true;
     if (pendingSync) { postSync(pendingSync); pendingSync = null; }

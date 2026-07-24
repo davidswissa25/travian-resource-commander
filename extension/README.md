@@ -9,11 +9,14 @@ No Tampermonkey, no `file://` toggle, no cross-origin bridge.
 |---|---|---|
 | Service worker | `background.js` | Toolbar icon → open/focus the dashboard tab |
 | Content script | `content.js` | On `*.travian.com`: injects the **⤓ Pull & Sync** button, reads every village (read-only), writes to `chrome.storage.local` |
+| Page hook | `page-hook.js` | Same pages but injected with `"world": "MAIN"`, the only place the game's own `fetch`/XHR are visible. Observes `/api/v1/trade-routes` calls and relays `{status, ok}` to `content.js` via `postMessage`. Read-only: it never alters a request or response. Exists because the create dialog stays open on success and the route list behind it doesn't refresh until dismissed, so every DOM-based success test is a guess — this reports the game's actual answer |
 | Dashboard host | `dashboard.html` + `dashboard.js` | Extension page; frames the tool, bridges `chrome.storage` ↔ the iframe via `postMessage` |
 | Dashboard app | `tool.html` | The Resource Commander, run in a **sandboxed** iframe so its inline scripts work under MV3 |
 
-**Data flow:** game tab → content script → `chrome.storage.local` → dashboard bridge → `postMessage` → `applySyncedData()` in the tool.
+**Data flow (pull):** game tab → content script → `chrome.storage.local` (`tc_sync`) → dashboard bridge → `postMessage` → `applySyncedData()` in the tool.
+**Data flow (apply routes):** the reverse — tool's **Apply in game ▸** → `postMessage {__tc:'apply'}` → dashboard bridge → `chrome.storage.local` (`tc_apply`) → content script's **⚡ Apply routes** panel, which pre-fills the in-game *Create trade route* form per route. **Pre-fill ▸** stops at the filled form for the user to submit; **▶ Create all** additionally presses Create for each route, verifying the dialog closed before counting it and halting on the first refusal. Batch progress (`tc_apply_state`) holds `done`/`pending`/`auto`, so a run survives the page reload each village switch requires.
 **Persistence:** the tool's `localStorage` is shimmed to an in-memory store, seeded from / mirrored back to `chrome.storage.local` (the sandboxed page has no real `localStorage`).
+**GM shim:** `content.js` is generated from the userscript, whose `GM_*` calls are mapped onto `chrome.storage`. Because `chrome.storage` is async and `GM_getValue` is synchronous, the shim mirrors the store into a cache and exposes `__tcWhenReady(fn)` for work that must wait for the first load (the Apply panel and its resume-after-navigation step).
 
 ## Build
 

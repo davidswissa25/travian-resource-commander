@@ -12,6 +12,12 @@
       "matches": ["*://*.travian.com/*"],
       "js": ["content.js"],
       "run_at": "document_idle"
+    },
+    {
+      "matches": ["*://*.travian.com/*"],
+      "js": ["page-hook.js"],
+      "world": "MAIN",
+      "run_at": "document_start"
     }
   ],
   "sandbox": {
