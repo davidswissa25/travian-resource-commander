@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Travian Commander - Pull & Sync bridge
 // @namespace    travian-commander
-// @version      1.12.0
+// @version      1.13.0
 // @description  One-click: a "Pull & Sync" button on the game retrieves every village's tribe, marketplace level, Trade Office level, barracks & stable levels, production, net crop, current resource storages (warehouse/granary stock + capacity), computed merchant capacity and active recurring trade routes, then pushes it straight into the Resource Commander tool (open in another tab) - no console, no file import. It also applies the tool's suggested routes: an "Apply routes" panel pre-fills the in-game Create-trade-route form per route for you to confirm, and can optionally create them all, or delete existing routes, on its own. Pulling is read-only; creating and deleting are opt-in, confirm first and can be stopped mid-run.
 // @author       you
 // @match        *://*.travian.com/*
@@ -528,7 +528,7 @@
       btn.click();
       const r = await fillCreateDialog(route);
       const shipNote = (r && r.shipMissing) ? ' NOTE: planned for trade ships, but ' + route.fromName + ' offers no "Use trade ships" option - it will go by merchants.' : '';
-      // during an automatic batch the "click Create" prompt would be wrong - createOne reports instead
+      // during an automatic batch the "click Create" prompt would be wrong - applyOne reports instead
       if ((applyState().auto || {}).on) { if (shipNote) toast(route.fromName + ' → ' + route.toName + ':' + shipNote, '#f0a92b'); }
       else toast('Pre-filled ' + route.fromName + ' → ' + route.toName + '. Review it and click "Create trade route".' + shipNote
         + (existingRouteTo(route.toName) ? ' WARNING: this village already sends to ' + route.toName + ' - creating this stacks a second schedule onto that route rather than making a new one.' : ''), '#f5b342');
@@ -542,15 +542,35 @@
     function stopAuto(msg, finished) {
       const s = applyState(); s.auto = null; s.pending = null; setApplyState(s);
       renderApplyPanel();
-      if (finished) toast('✓ Done - every route in the plan now exists in game.', '#3fb950');
-      else if (msg) toast('Auto-create stopped: ' + msg, '#f0533f');
+      if (finished) toast('✓ Done - the game now matches the plan.', '#3fb950');
+      else if (msg) toast('Apply stopped: ' + msg, '#f0533f');
       return false;
     }
-    // Fill the dialog for one route, press Create, and confirm the form actually closed.
-    async function createOne(route) {
+    // Apply ONE changeset op on the village currently on screen. "delete" removes the named route and
+    // stops there; "update" removes it and falls through to re-create it with the new amounts; "create"
+    // (also the default for plans made before ops existed) just creates.
+    async function applyOne(route) {
+      const op = route.op || 'create';
+      if (op === 'delete' || op === 'update') {
+        const res = await deleteRouteTo(route.toName);
+        if (res === 'fail') return stopAuto('could not delete ' + route.fromName + ' → ' + route.toName);
+        if (op === 'delete') {
+          const s0 = applyState();
+          (s0.done = s0.done || {})[route.id] = true;
+          if (res === 'missing') (s0.skipped = s0.skipped || {})[route.id] = true;
+          setApplyState(s0);
+          toast((res === 'missing' ? '= ' : '🗑 ') + route.fromName + ' → ' + route.toName +
+                (res === 'missing' ? ' — no such route, nothing to delete' : ' deleted'), res === 'missing' ? '#8b9aa8' : '#3fb950');
+          renderApplyPanel();
+          await pause();
+          return true;
+        }
+        await pause();                                          // replaced: now create it fresh below
+      }
       // Never create a second route to a destination this village already serves - it would stack a
       // schedule onto the existing one rather than show up as a duplicate. Skipping instead of failing
-      // makes "Create all" safe to re-run, and safe after a reset or a halted run.
+      // makes "Apply all" safe to re-run, and safe after a reset or a halted run. (An update already
+      // deleted its old route above, so this cannot swallow a replace.)
       if (existingRouteTo(route.toName)) {
         const s0 = applyState();
         (s0.done = s0.done || {})[route.id] = true;
@@ -677,6 +697,57 @@
         await pause();
       }
     }
+    /* ----- targeted delete: remove ONE route (the village on screen -> a named destination) -----
+       Backs the changeset ops: "delete" retires a route the plan dropped, and "update" removes the old
+       one before re-creating it, because the game offers no edit-the-amounts flow and creating over an
+       existing route only stacks another schedule onto it. */
+    const normName = s => String(s || '').replace(/\s+/g, ' ').trim().toLowerCase();
+    // Each route on the tab owns one group checkbox (its "Resource" header row). Climb from the box
+    // until an ancestor names the destination, so a checkbox can be tied to the village it feeds.
+    function routeGroups() {
+      return [...document.querySelectorAll('input[type=checkbox]')]
+        .filter(c => c.offsetParent && !c.name && !c.closest('#tcApplyPanel'))
+        .map(c => {
+          const row = c.closest('tr,div');
+          if (!row || !/^Resource\b/.test((row.innerText || '').trim())) return null;
+          let el = c, dest = '';
+          for (let i = 0; i < 8 && el; i++, el = el.parentElement) {
+            const m = (el.innerText || '').match(/To:\s*([^\n]+)/);
+            if (m) { dest = m[1].replace(/Travel.*/i, '').replace(/\s+/g, ' ').trim(); break; }
+          }
+          return dest ? { cb: c, dest: dest } : null;
+        }).filter(Boolean);
+    }
+    // 'ok' removed · 'missing' no such route here (already gone - not an error) · 'fail' it would not go.
+    async function deleteRouteTo(toName) {
+      const want = normName(toName);
+      const g = routeGroups().find(x => normName(x.dest) === want);
+      if (!g) return 'missing';
+      if (!g.cb.checked) g.cb.click();
+      await pause();
+      let edit;
+      try {
+        edit = await waitEl(() => [...document.querySelectorAll('button')]
+          .find(b => /Edit selected/i.test(b.textContent || '') && !/\bdisabled\b/.test((b.className || '').toString())) || null, 6000);
+      } catch (e) { return 'fail'; }
+      edit.click();
+      let trash;
+      try { trash = await waitEl(() => document.querySelector('button.delete'), 8000); } catch (e) { return 'fail'; }
+      const rowsBefore = listRowCount();
+      await pause();                                             // beat before the destructive click
+      const t0 = Date.now();
+      trash.click();
+      await sleep(400);                                          // let a confirm step appear if there is one
+      const yes = [...document.querySelectorAll('button')].find(b => /^\s*(yes|ok|delete|confirm)\s*$/i.test(b.textContent || ''));
+      if (yes && document.querySelector('button.delete')) yes.click();
+      // the game's own DELETE is the proof; fall back to the list shrinking only if the hook isn't there
+      let ok = await confirmedByGame('DELETE', t0);
+      if (!ok && !netSeen.any) ok = await waitEl(() => listRowCount() < rowsBefore ? true : null, 9000).then(() => true, () => false);
+      const closeBtn = [...document.querySelectorAll('button')].find(b => /^\s*Cancel\s*$/i.test(b.textContent || ''));
+      if (closeBtn && document.querySelector('button.delete')) closeBtn.click();
+      await sleep(300);
+      return ok ? 'ok' : 'fail';
+    }
     async function deleteLoop() {
       if (delBusy) return;
       delBusy = true;
@@ -717,8 +788,28 @@
       const route = (plan.routes || []).find(r => r.id === st.pending.rid);
       st.pending = null; setApplyState(st);
       if (!route || !/gid=17/.test(location.href)) return;
-      if (auto) { if (await createOne(route)) autoLoop(); return; }   // batch: submit it, then carry on
-      try { await prefillHere(route); } catch (e) { toast('Could not pre-fill: ' + e.message, '#f0533f'); }
+      if (auto) { if (await applyOne(route)) autoLoop(); return; }   // batch: apply it, then carry on
+      // Manual, one row at a time: a delete is done outright (you pressed Delete on that row), while a
+      // create/replace stops at the filled form for you to review and press Create yourself.
+      const op = route.op || 'create';
+      try {
+        if (op === 'delete' || op === 'update') {
+          const res = await deleteRouteTo(route.toName);
+          if (res === 'fail') { toast('Could not delete ' + route.fromName + ' → ' + route.toName + ' - do it by hand, then mark the row ✓', '#f0533f'); return; }
+          if (op === 'delete') {
+            const s = applyState();
+            (s.done = s.done || {})[route.id] = true;
+            if (res === 'missing') (s.skipped = s.skipped || {})[route.id] = true;
+            setApplyState(s);
+            toast(res === 'missing' ? '= ' + route.fromName + ' has no route to ' + route.toName + ' - nothing to delete'
+                                    : '🗑 Deleted ' + route.fromName + ' → ' + route.toName, res === 'missing' ? '#8b9aa8' : '#3fb950');
+            renderApplyPanel();
+            return;
+          }
+          await pause();
+        }
+        await prefillHere(route);
+      } catch (e) { toast('Could not apply: ' + e.message, '#f0533f'); }
     }
 
     function renderApplyPanel() {
@@ -741,8 +832,14 @@
       const ordered = orderRoutes(plan.routes);
       let lastFrom = null;
       const skipped = st.skipped || {};
+      // A plan is a CHANGESET: each row is one op. create = make it, replace = delete the old one then
+      // re-create it (the game has no edit-amounts flow), delete = retire it.
+      const OPS = { create: { m: '+', c: '#3fb950', b: 'Pre-fill ▸' },
+                    update: { m: '~', c: '#f5b342', b: 'Replace ▸' },
+                    'delete': { m: '−', c: '#f0805f', b: 'Delete ▸' } };
+      const opOf = r => OPS[r.op || 'create'] || OPS.create;
       const rows = ordered.map(r => {
-        const dn = !!done[r.id];
+        const dn = !!done[r.id], op = r.op || 'create', o = opOf(r);
         const res = [['\u{1FAB5}', r.res.lumber], ['\u{1F9F1}', r.res.clay], ['⛏', r.res.iron], ['\u{1F33E}', r.res.crop]].filter(x => x[1] > 0).map(x => x[0] + nfmt(x[1])).join(' ');
         let head = '';
         if (r.fromName !== lastFrom) {
@@ -751,18 +848,21 @@
           head = '<div style="margin-top:7px;padding-top:6px;border-top:1px solid #2a3744;color:#f5b342;font-weight:600">\u{1F69A} ' + escH(r.fromName) +
                  ' <span style="color:#5d6b78;font-weight:400">' + n + ' route' + (n > 1 ? 's' : '') + '</span></div>';
         }
+        const detail = op === 'delete'
+          ? '<span style="color:#f0805f">remove this route</span>'
+          : '<span style="color:#8b9aa8">' + res + ' · every ' + snapIv(r.interval) + 'h' + (r.useShips ? ' · ⛵' : '') + (op === 'update' ? ' <span style="color:#f5b342">(replaces the current one)</span>' : '') + '</span>';
         return head + '<div style="display:flex;gap:6px;align-items:center;padding:4px 0 4px 8px;' + (dn ? 'opacity:.45' : '') + '">' +
-          '<div style="flex:1;min-width:0">→ <b>' + escH(r.toName) + '</b><br><span style="color:#8b9aa8">' + res + ' · every ' + snapIv(r.interval) + 'h' + (r.useShips ? ' · ⛵' : '') + '</span></div>' +
+          '<div style="flex:1;min-width:0"><span style="color:' + o.c + ';font-weight:700" title="' + op + '">' + o.m + '</span> <b>' + escH(r.toName) + '</b><br>' + detail + '</div>' +
           (dn ? (skipped[r.id]
-                ? '<span style="color:#8b9aa8" title="this village already had a route to that destination, so it was left alone">= exists</span>'
-                : '<span style="color:#3fb950;font-size:15px" title="created by the panel">✓</span>')
-              : '<button data-rid="' + escH(r.id) + '" class="tcPre" style="cursor:pointer;background:#1d2630;color:#f5b342;border:1px solid #2a3744;border-radius:6px;padding:4px 8px;font:inherit;white-space:nowrap">Pre-fill ▸</button>' +
-                '<button data-rid="' + escH(r.id) + '" class="tcDone" title="mark as created / skip" style="cursor:pointer;background:transparent;color:#8b9aa8;border:1px solid #2a3744;border-radius:6px;padding:4px 7px;font:inherit">✓</button>') +
+                ? '<span style="color:#8b9aa8" title="' + (op === 'delete' ? 'there was no such route here - nothing to delete' : 'this village already had a route to that destination, so it was left alone') + '">= ' + (op === 'delete' ? 'none' : 'exists') + '</span>'
+                : '<span style="color:#3fb950;font-size:15px" title="applied by the panel">✓</span>')
+              : '<button data-rid="' + escH(r.id) + '" class="tcPre" style="cursor:pointer;background:#1d2630;color:' + o.c + ';border:1px solid #2a3744;border-radius:6px;padding:4px 8px;font:inherit;white-space:nowrap">' + o.b + '</button>' +
+                '<button data-rid="' + escH(r.id) + '" class="tcDone" title="mark as done / skip" style="cursor:pointer;background:transparent;color:#8b9aa8;border:1px solid #2a3744;border-radius:6px;padding:4px 7px;font:inherit">✓</button>') +
           '</div>';
       }).join('');
       const dcount = ordered.filter(r => done[r.id]).length;
-      panel.innerHTML = '<div id="tcApplyHead" title="drag to move · double-click to snap back to the corner" style="display:flex;align-items:center;gap:6px;margin-bottom:4px;cursor:move;user-select:none"><span style="color:#5d6b78">⠿</span><b style="color:#f5b342">⚡ Apply routes</b><span style="color:#8b9aa8">' + dcount + '/' + plan.routes.length + '</span><span style="flex:1"></span><button id="tcApplyReset" title="reset progress" style="cursor:pointer;background:transparent;color:#8b9aa8;border:none;font:inherit">reset</button><button id="tcApplyClose" title="dismiss this plan" style="cursor:pointer;background:transparent;color:#8b9aa8;border:none;font-size:17px;line-height:1">×</button></div>' +
-        '<div style="color:#8b9aa8;margin-bottom:2px">Each opens the in-game create form <b>pre-filled</b> — you review &amp; click <b>Create trade route</b>. Nothing is created without your click.</div>' +
+      panel.innerHTML = '<div id="tcApplyHead" title="drag to move · double-click to snap back to the corner" style="display:flex;align-items:center;gap:6px;margin-bottom:4px;cursor:move;user-select:none"><span style="color:#5d6b78">⠿</span><b style="color:#f5b342">⚡ Apply changes</b><span style="color:#8b9aa8">' + dcount + '/' + plan.routes.length + '</span><span style="flex:1"></span><button id="tcApplyReset" title="reset progress" style="cursor:pointer;background:transparent;color:#8b9aa8;border:none;font:inherit">reset</button><button id="tcApplyClose" title="dismiss this plan" style="cursor:pointer;background:transparent;color:#8b9aa8;border:none;font-size:17px;line-height:1">×</button></div>' +
+        '<div style="color:#8b9aa8;margin-bottom:2px">Only the <b>differences</b> from your plan: <span style="color:#3fb950">+</span> create, <span style="color:#f5b342">~</span> replace, <span style="color:#f0805f">−</span> delete. Create/replace stop at the <b>pre-filled</b> form for you to press <b>Create trade route</b>; deletes are done for you.</div>' +
         '<div style="color:#8b9aa8;margin:4px 0 1px;display:flex;align-items:center;gap:5px;flex-wrap:wrap" title="A random pause drawn from this range before every step - each field while filling, and each click while creating or deleting. Set both to 0 to run at full speed.">step delay ' +
           '<input id="tcStepMin" type="number" min="0" step="50" value="' + stepRange()[0] + '" style="width:56px;background:#1d2630;color:#e6edf3;border:1px solid #2a3744;border-radius:5px;padding:2px 4px;font:inherit">' +
           '<span>–</span>' +
@@ -773,14 +873,14 @@
           const stopBtn = (id, label) => '<div style="margin:6px 0 2px;display:flex;align-items:center;gap:7px">' +
             '<button id="' + id + '" style="cursor:pointer;background:#3a1d1d;color:#f0533f;border:1px solid #f0533f;border-radius:6px;padding:4px 10px;font:inherit;font-weight:600">■ Stop</button>' +
             '<span style="color:#f0a92b">' + label + '</span></div>';
-          if (st.auto && st.auto.on) return stopBtn('tcAutoStop', 'creating routes automatically…');
+          if (st.auto && st.auto.on) return stopBtn('tcAutoStop', 'applying changes automatically…');
           if (st.del && st.del.on) return stopBtn('tcDelStop', 'deleting routes… (' + (st.del.removed || 0) + ' so far)');
           const btn = (id, bg, fg, br, label, tip, off) =>
             '<button id="' + id + '"' + (off ? ' disabled' : '') + ' title="' + tip + '" style="cursor:' + (off ? 'not-allowed' : 'pointer') +
             ';background:' + bg + ';color:' + (off ? '#5d6b78' : fg) + ';border:1px solid ' + br + ';border-radius:6px;padding:4px 10px;font:inherit;font-weight:600">' + label + '</button>';
           return '<div style="margin:6px 0 2px">' +
-              btn('tcAutoAll', '#1d2630', '#f5b342', '#2a3744', '▶ Create all ' + left + ' remaining',
-                  'Fill AND submit every remaining route, one after another. This presses Create for you.', !left) +
+              btn('tcAutoAll', '#1d2630', '#f5b342', '#2a3744', '▶ Apply all ' + left + ' remaining',
+                  'Work through every remaining change: delete what the plan dropped, replace what changed, submit each new route. This presses Create and the trash button for you.', !left) +
             '</div>' +
             '<div style="margin:4px 0 2px;display:flex;align-items:center;gap:6px;flex-wrap:wrap">' +
               '<span style="color:#5d6b78">delete existing:</span>' +
@@ -798,14 +898,14 @@
       if (aa) aa.onclick = () => {
         const left = ordered.filter(r => !done[r.id]).length;
         if (!left) return;
-        if (!confirm('Create ' + left + ' trade route' + (left > 1 ? 's' : '') + ' in game automatically?\n\n' +
-                     'The script fills each form and presses Create itself, working down the list.\n' +
-                     'It stops on the first route the game refuses, and you can hit Stop at any time.')) return;
+        if (!confirm('Apply ' + left + ' change' + (left > 1 ? 's' : '') + ' in game automatically?\n\n' +
+                     'It deletes what the plan dropped, replaces what changed, and presses Create for new routes.\n' +
+                     'Deleting cannot be undone from here. It stops on the first thing the game refuses, and you can hit Stop at any time.')) return;
         const s = applyState(); s.auto = { on: true, curDid: 0 }; s.pending = null; setApplyState(s);
         renderApplyPanel(); autoLoop();
       };
       const as = panel.querySelector('#tcAutoStop');
-      if (as) as.onclick = () => { const s = applyState(); s.auto = null; s.pending = null; setApplyState(s); renderApplyPanel(); toast('Stopped - nothing further will be created.', '#f0a92b'); };
+      if (as) as.onclick = () => { const s = applyState(); s.auto = null; s.pending = null; setApplyState(s); renderApplyPanel(); toast('Stopped - nothing further will be applied.', '#f0a92b'); };
       // Deleting existing routes. Destructive and not undoable from here, so both paths confirm, and
       // the all-villages one confirms again once it knows how many villages it would walk.
       const dh = panel.querySelector('#tcDelHere');
@@ -853,7 +953,15 @@
       const saveRange = () => { const s = applyState(); s.stepMin = Math.max(0, +mn.value || 0); s.stepMax = Math.max(0, +mx.value || 0); delete s.stepMs; setApplyState(s); };
       if (mn) mn.onchange = saveRange;
       if (mx) mx.onchange = saveRange;
-      panel.querySelectorAll('.tcPre').forEach(b => b.onclick = () => startPrefill(b.getAttribute('data-rid')));
+      // Row action. A create just pre-fills the form, but a delete/replace removes a live route, so
+      // those confirm first - the panel never deletes anything off a single stray click.
+      panel.querySelectorAll('.tcPre').forEach(b => b.onclick = () => {
+        const rid = b.getAttribute('data-rid');
+        const r = (plan.routes || []).find(x => x.id === rid), op = (r && r.op) || 'create';
+        if (op === 'delete' && !confirm('Delete the route ' + r.fromName + ' → ' + r.toName + ' in game?\n\nThis cannot be undone from here.')) return;
+        if (op === 'update' && !confirm('Replace the route ' + r.fromName + ' → ' + r.toName + '?\n\nThe existing route is DELETED first (the game has no edit-amounts flow), then the create form opens pre-filled with the new amounts for you to confirm.')) return;
+        startPrefill(rid);
+      });
       panel.querySelectorAll('.tcDone').forEach(b => b.onclick = () => { const s = applyState(); (s.done = s.done || {})[b.getAttribute('data-rid')] = true; setApplyState(s); renderApplyPanel(); });
     }
 
